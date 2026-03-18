@@ -5,7 +5,7 @@ include("shared.lua")
 local gred = gred or {}
 
 local function HasGred()
-    return gred and gred.CreateBullet and gred.CreateShell
+    return gred and gred.CreateShell
 end
 
 local PASS_SOUNDS = {
@@ -21,14 +21,12 @@ end
 ENT.WeaponWindow        = 10
 ENT.AimConeDegrees      = 10
 
+ENT.GAU_ConeDegrees     = 600   -- huge cone: spectacle over lethality, both modes use this
+
 ENT.GAU_FirstBurstTime  = 0
 ENT.GAU_SecondBurstTime = 5
 ENT.GAU_BurstCount      = 25
 ENT.GAU_BurstDelay      = 0.033
-ENT.GAU_Caliber         = "wac_base_20mm"
-ENT.GAU_TracerColor     = "red"
-ENT.GAU_DamageMul       = 0.5
-ENT.GAU_RadiusMul       = 0.5
 ENT.GAU_SweepHalfLength = 600
 ENT.GAU_JitterAmount    = 200
 
@@ -44,7 +42,6 @@ ENT.GUN105_TNT          = 2.5
 ENT.GUN40_Scatter       = 600
 ENT.GUN105_Scatter      = 400
 
--- Spray GAU fires every tick continuously, same caliber/tracer as normal GAU
 ENT.GAU_Spray_Delay     = 0.033
 
 ENT.MuzzleForwardOffset = 250
@@ -154,10 +151,6 @@ function ENT:Initialize()
 
     self.MuzzleIndexGlobal  = 1
     self.MuzzleIndexWeapon  = 1
-
-    if not HasGred() then
-        self:Debug("WARNING: Gred base not found; falling back to rpg_missile.")
-    end
 end
 
 function ENT:Think()
@@ -221,7 +214,6 @@ function ENT:PickNewWeapon(ct)
         self.GAUSound:Stop()
     end
 
-    -- 4 equal rolls: 25mm burst, 40mm, 105mm, 25mm spray
     local roll = math.random(1, 4)
     if roll == 1 then
         self.CurrentWeapon = "25mm"
@@ -258,7 +250,6 @@ function ENT:PickNewWeapon(ct)
     elseif self.CurrentWeapon == "105mm" then
         self.NextShotTime105 = ct + 0.5
     elseif self.CurrentWeapon == "25mm_spray" then
-        -- Start firing immediately, cache a fixed sweep for the whole window
         self.NextShotTimeSpray = ct
         local targetPos = self:GetTargetGroundPos()
         local sweepDir  = Vector(math.Rand(-1, 1), math.Rand(-1, 1), 0)
@@ -298,7 +289,6 @@ function ENT:GetTargetGroundPos()
         Vector(0, 0, -30000),
         self
     )
-
     return tr.HitPos
 end
 
@@ -310,33 +300,6 @@ function ENT:GetMuzzlePos()
     local muzzle  = pos + forward * self.MuzzleForwardOffset + right * self.MuzzleSideOffset
     muzzle.z      = self.sky
     return muzzle
-end
-
-function ENT:GetConeAimedDirection(baseConeDeg)
-    local muzzlePos = self:GetMuzzlePos()
-    local target    = self:GetPrimaryTarget()
-    local targetPos
-
-    if IsValid(target) then
-        targetPos = target:EyePos()
-    else
-        targetPos = Vector(self.CenterPos.x, self.CenterPos.y, self.CenterPos.z + 8)
-    end
-
-    local aimDir = targetPos - muzzlePos
-    if aimDir:LengthSqr() <= 1 then
-        aimDir = self:GetAngles():Forward()
-    end
-    aimDir:Normalize()
-
-    local cone = math.rad(baseConeDeg)
-    local ang  = aimDir:Angle()
-    ang:RotateAroundAxis(ang:Up(),    math.Rand(-cone, cone))
-    ang:RotateAroundAxis(ang:Right(), math.Rand(-cone * 0.5, cone * 0.5))
-
-    local dir = ang:Forward()
-    dir:Normalize()
-    return dir, muzzlePos
 end
 
 function ENT:GetWeaponMuzzleWorldPos()
@@ -367,10 +330,42 @@ function ENT:SpawnWeaponMuzzleFX(effectName, scale)
     end
 end
 
+-- ===================== GAU SHARED FIRE (TrajSim-GAU) =====================
+-- Both 25mm burst and 25mm spray call this.
+-- Cone of 600 degrees makes it pure spectacle.
+
+function ENT:FireGAURound(muzzlePos, targetGroundPos)
+    -- Apply the huge aim cone by scattering the target point on the ground plane.
+    -- We do NOT use GetConeAimedDirection because a 600-degree angular cone
+    -- from 6000 HU altitude produces nonsensical downward vectors.
+    -- Instead we scatter the ground impact point directly — this is equivalent
+    -- and well-behaved regardless of altitude.
+    local scatter = self.GAU_ConeDegrees -- reuse field as scatter radius in HU
+    local finalImpact = targetGroundPos + Vector(
+        math.Rand(-scatter, scatter),
+        math.Rand(-scatter, scatter),
+        0
+    )
+
+    local dir = finalImpact - muzzlePos
+    if dir:LengthSqr() < 1 then return end
+    dir:Normalize()
+
+    self:FireBullets({
+        Src       = muzzlePos,
+        Dir       = dir,
+        Damage    = TRAJ_GAU and TRAJ_GAU.damage or 35,
+        Num       = 1,
+        Tracer    = 1,
+        Spread    = Vector(0, 0, 0),
+        Inflictor = self,
+        AmmoType  = "pistol",
+    })
+end
+
 -- ===================== 25mm GAU (burst) =====================
 
 function ENT:Update25mmBurstsSchedule(ct)
-    if not HasGred() then return end
     if not self.GAU_BurstTimes then return end
 
     for i, t in ipairs(self.GAU_BurstTimes) do
@@ -389,8 +384,6 @@ function ENT:Update25mmBurstsSchedule(ct)
 end
 
 function ENT:StartGAUBurst()
-    if not HasGred() then return end
-
     local targetPos = self:GetTargetGroundPos()
     local muzzlePos = self:GetMuzzlePos()
 
@@ -409,7 +402,6 @@ function ENT:StartGAUBurst()
 end
 
 function ENT:UpdateActiveGAUBursts(ct)
-    if not HasGred() then return end
     if not self.GAU_ActiveBursts then return end
 
     for idx = #self.GAU_ActiveBursts, 1, -1 do
@@ -428,34 +420,18 @@ function ENT:UpdateActiveGAUBursts(ct)
 end
 
 function ENT:FireSingleGAUBullet(bulletIndex)
-    if not HasGred() then return end
     if not self.GAU_SweepStartPos then return end
 
     local fraction   = math.Clamp((bulletIndex - 1) / (self.GAU_BurstCount - 1), 0, 1)
     local baseImpact = LerpVector(fraction, self.GAU_SweepStartPos, self.GAU_SweepEndPos)
-    local jitter     = Vector(
-        math.Rand(-self.GAU_JitterAmount, self.GAU_JitterAmount),
-        math.Rand(-self.GAU_JitterAmount, self.GAU_JitterAmount),
-        0
-    )
-    local finalImpact = baseImpact + jitter
 
     local muzzlePos = self.GAU_SweepMuzzlePos or self:GetMuzzlePos()
-    local dir       = finalImpact - muzzlePos
-    if dir:LengthSqr() < 1 then return end
-    dir:Normalize()
-
-    gred.CreateBullet(
-        self, muzzlePos, dir:Angle(), self.GAU_Caliber,
-        { self }, nil, false,
-        self.GAU_TracerColor, self.GAU_DamageMul, self.GAU_RadiusMul, false
-    )
+    self:FireGAURound(muzzlePos, baseImpact)
 end
 
--- ===================== 25mm GAU (spray – full window, no stop) =====================
+-- ===================== 25mm GAU (spray) =====================
 
 function ENT:Update25mmSpray(ct)
-    if not HasGred() then return end
     if ct < self.NextShotTimeSpray then return end
     if ct >= self.WeaponWindowEnd then
         if self.GAUSound and self.GAUSound:IsPlaying() then self.GAUSound:Stop() end
@@ -464,24 +440,9 @@ function ENT:Update25mmSpray(ct)
 
     self.NextShotTimeSpray = ct + self.GAU_Spray_Delay
 
-    -- Re-jitter impact point every shot for spray-and-pray scatter
     local targetPos = self:GetTargetGroundPos()
-    local finalImpact = targetPos + Vector(
-        math.Rand(-self.GAU_JitterAmount * 2, self.GAU_JitterAmount * 2),
-        math.Rand(-self.GAU_JitterAmount * 2, self.GAU_JitterAmount * 2),
-        0
-    )
-
     local muzzlePos = self.GAU_SweepMuzzlePos or self:GetMuzzlePos()
-    local dir       = finalImpact - muzzlePos
-    if dir:LengthSqr() < 1 then return end
-    dir:Normalize()
-
-    gred.CreateBullet(
-        self, muzzlePos, dir:Angle(), self.GAU_Caliber,
-        { self }, nil, false,
-        self.GAU_TracerColor, self.GAU_DamageMul, self.GAU_RadiusMul, false
-    )
+    self:FireGAURound(muzzlePos, targetPos)
 end
 
 -- ===================== 40mm =====================
@@ -521,8 +482,11 @@ function ENT:Update40mm(ct)
     else
         local m = ents.Create("rpg_missile")
         if IsValid(m) then
-            m:SetPos(muzzlePos) m:SetAngles(dir:Angle()) m:SetOwner(self)
-            m:Spawn() m:Activate()
+            m:SetPos(muzzlePos)
+            m:SetAngles(dir:Angle())
+            m:SetOwner(self)
+            m:Spawn()
+            m:Activate()
             local phys = m:GetPhysicsObject()
             if IsValid(phys) then phys:SetVelocity(dir * 1600) end
         end
@@ -532,34 +496,29 @@ function ENT:Update40mm(ct)
     sound.Play("killstreak_rewards/ac-130_40mm_fire.wav", self.CenterPos, 110, math.random(96, 104), 1.0)
 end
 
--- ===================== 105mm – Gredwitch shell + stacked 500lb FX =====================
+-- ===================== 105mm =====================
 
 function ENT:Spawn105mmEffects(pos)
-    -- Ground-level primary blast
     local ed1 = EffectData()
     ed1:SetOrigin(pos)
     ed1:SetScale(6) ed1:SetMagnitude(6) ed1:SetRadius(600)
     util.Effect("500lb_air", ed1, true, true)
 
-    -- Rising fireball body
     local ed2 = EffectData()
     ed2:SetOrigin(pos + Vector(0, 0, 80))
     ed2:SetScale(5) ed2:SetMagnitude(5) ed2:SetRadius(500)
     util.Effect("500lb_air", ed2, true, true)
 
-    -- Top of column
     local ed3 = EffectData()
     ed3:SetOrigin(pos + Vector(0, 0, 180))
     ed3:SetScale(4) ed3:SetMagnitude(4) ed3:SetRadius(400)
     util.Effect("500lb_air", ed3, true, true)
 
-    -- Wide dirt/debris skirt at ground
     local ed4 = EffectData()
     ed4:SetOrigin(pos)
     ed4:SetScale(6) ed4:SetMagnitude(6) ed4:SetRadius(600)
     util.Effect("HelicopterMegaBomb", ed4, true, true)
 
-    -- Mid-column smoke thickener
     local ed5 = EffectData()
     ed5:SetOrigin(pos + Vector(0, 0, 100))
     ed5:SetScale(5) ed5:SetMagnitude(5) ed5:SetRadius(500)
@@ -593,9 +552,8 @@ function ENT:Update105mm(ct)
             shell.Armed         = true
             shell.ShouldExplode = true
 
-            -- Boost camera shake fields on the shell itself
-            shell.Shocktime  = 8      -- much longer rumble than default
-            shell.ShockForce = 1200   -- stronger push on nearby players
+            shell.Shocktime  = 8
+            shell.ShockForce = 1200
             shell.DEFAULT_PHYSFORCE_PLYGROUND = 1500
             shell.DEFAULT_PHYSFORCE_PLYAIR    = 80
 
@@ -605,7 +563,6 @@ function ENT:Update105mm(ct)
                 phys:SetVelocity(dir * self.GUN105_ShellVelocity)
             end
 
-            -- Inject stacked 500lb effects on explosion
             local plane      = self
             local oldExplode = shell.OnExplode
             shell.OnExplode  = function(s, pos, normal)
@@ -613,7 +570,6 @@ function ENT:Update105mm(ct)
                 plane:Spawn105mmEffects(pos or s:GetPos())
             end
 
-            -- Safety net for alternate Gredwitch hook name
             local oldImpact = shell.OnImpact
             shell.OnImpact  = function(s, pos, normal)
                 if oldImpact then oldImpact(s, pos, normal) end
@@ -623,8 +579,11 @@ function ENT:Update105mm(ct)
     else
         local m = ents.Create("rpg_missile")
         if IsValid(m) then
-            m:SetPos(muzzlePos) m:SetAngles(dir:Angle()) m:SetOwner(self)
-            m:Spawn() m:Activate()
+            m:SetPos(muzzlePos)
+            m:SetAngles(dir:Angle())
+            m:SetOwner(self)
+            m:Spawn()
+            m:Activate()
             local phys = m:GetPhysicsObject()
             if IsValid(phys) then phys:SetVelocity(dir * 1800) end
         end
@@ -655,8 +614,8 @@ function ENT:PhysicsUpdate(phys)
     local dist       = flatPos:Distance(flatCenter)
 
     if dist > self.OrbitRadius and (self.TurnDelay or 0) < CurTime() then
-        self.ang      = self.ang + Angle(0, 0.1, 0)
-        self.TurnDelay= CurTime() + 0.02
+        self.ang       = self.ang + Angle(0, 0.1, 0)
+        self.TurnDelay = CurTime() + 0.02
     end
 
     local tr = util.QuickTrace(self:GetPos(), self:GetForward() * 3000, self)
