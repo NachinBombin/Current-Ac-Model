@@ -1,11 +1,26 @@
 AddCSLuaFile("cl_init.lua")
 AddCSLuaFile("shared.lua")
 include("shared.lua")
+include("traj_gau/init.lua")
+
+util.AddNetworkString("bombin_plane_sound")
 
 local gred = gred or {}
 
 local function HasGred()
     return gred and gred.CreateShell
+end
+
+-- Broadcasts a sound to all clients in PVS of pos.
+-- Replaces every bare sound.Play() call which only plays server-side.
+local function NetSound(path, pos, level, pitch, volume)
+    net.Start("bombin_plane_sound")
+    net.WriteString(path)
+    net.WriteVector(pos)
+    net.WriteUInt(level  or 75,  8)
+    net.WriteUInt(pitch  or 100, 8)
+    net.WriteFloat(volume or 1.0)
+    net.SendPVS(pos)
 end
 
 local PASS_SOUNDS = {
@@ -21,7 +36,7 @@ end
 ENT.WeaponWindow        = 10
 ENT.AimConeDegrees      = 10
 
-ENT.GAU_ConeDegrees     = 600   -- huge cone: spectacle over lethality, both modes use this
+ENT.GAU_ConeDegrees     = 600
 
 ENT.GAU_FirstBurstTime  = 0
 ENT.GAU_SecondBurstTime = 5
@@ -131,7 +146,7 @@ function ENT:Initialize()
 
     self.GAUSound = CreateSound(game.GetWorld(), self.GAU_Loop_SoundPath)
 
-    sound.Play(table.Random(PASS_SOUNDS), self.CenterPos, 75, 100, 0.7)
+    NetSound(table.Random(PASS_SOUNDS), self.CenterPos, 75, 100, 0.7)
     self:Debug("Spawned at " .. tostring(spawnPos))
 
     self.CurrentWeapon      = nil
@@ -170,7 +185,7 @@ function ENT:Think()
     end
 
     if ct >= self.NextPassSound then
-        sound.Play(table.Random(PASS_SOUNDS), self.CenterPos, 75, math.random(96, 104), 0.7)
+        NetSound(table.Random(PASS_SOUNDS), self.CenterPos, 75, math.random(96, 104), 0.7)
         self.NextPassSound = ct + math.Rand(4, 7)
     end
 
@@ -331,16 +346,9 @@ function ENT:SpawnWeaponMuzzleFX(effectName, scale)
 end
 
 -- ===================== GAU SHARED FIRE (TrajSim-GAU) =====================
--- Both 25mm burst and 25mm spray call this.
--- Cone of 600 degrees makes it pure spectacle.
 
 function ENT:FireGAURound(muzzlePos, targetGroundPos)
-    -- Apply the huge aim cone by scattering the target point on the ground plane.
-    -- We do NOT use GetConeAimedDirection because a 600-degree angular cone
-    -- from 6000 HU altitude produces nonsensical downward vectors.
-    -- Instead we scatter the ground impact point directly — this is equivalent
-    -- and well-behaved regardless of altitude.
-    local scatter = self.GAU_ConeDegrees -- reuse field as scatter radius in HU
+    local scatter = self.GAU_ConeDegrees
     local finalImpact = targetGroundPos + Vector(
         math.Rand(-scatter, scatter),
         math.Rand(-scatter, scatter),
@@ -398,7 +406,7 @@ function ENT:StartGAUBurst()
     table.insert(self.GAU_ActiveBursts, { bulletsFired = 0, nextTime = CurTime() })
 
     self:SpawnWeaponMuzzleFX("cball_explode", 1)
-    sound.Play("killstreak_rewards/ac-130_25mm_fire.wav", self.CenterPos, 110, math.random(96, 104), 1.0)
+    NetSound("killstreak_rewards/ac-130_25mm_fire.wav", self.CenterPos, 110, math.random(96, 104), 1.0)
 end
 
 function ENT:UpdateActiveGAUBursts(ct)
@@ -493,7 +501,7 @@ function ENT:Update40mm(ct)
     end
 
     self:SpawnWeaponMuzzleFX("cball_explode", 2)
-    sound.Play("killstreak_rewards/ac-130_40mm_fire.wav", self.CenterPos, 110, math.random(96, 104), 1.0)
+    NetSound("killstreak_rewards/ac-130_40mm_fire.wav", self.CenterPos, 110, math.random(96, 104), 1.0)
 end
 
 -- ===================== 105mm =====================
@@ -590,7 +598,7 @@ function ENT:Update105mm(ct)
     end
 
     self:SpawnWeaponMuzzleFX("cball_explode", 3)
-    sound.Play("killstreak_rewards/ac-130_105mm_fire.wav", self.CenterPos, 110, math.random(96, 104), 1.0)
+    NetSound("killstreak_rewards/ac-130_105mm_fire.wav", self.CenterPos, 110, math.random(96, 104), 1.0)
 end
 
 -- ===================== FLIGHT / ORBIT =====================
