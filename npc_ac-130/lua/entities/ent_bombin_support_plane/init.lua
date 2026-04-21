@@ -136,6 +136,7 @@ function ENT:Initialize()
     self:SetSolid(SOLID_VPHYSICS)
     self:SetCollisionGroup(COLLISION_GROUP_INTERACTIVE_DEBRIS)
     self:SetPos(spawnPos)
+    self.LastPos = spawnPos
 
     self:SetNWInt("HP",    self.MaxHP)
     self:SetNWInt("MaxHP", self.MaxHP)
@@ -234,7 +235,11 @@ function ENT:DestroyPlane()
     if self.IsDestroyed then return end
     self.IsDestroyed = true
 
-    local pos = self:GetPos()
+    if self.IdleLoop then self.IdleLoop:Stop() end
+    if self.PlaneAmbientLoop then self.PlaneAmbientLoop:Stop() end
+    self:StopSprayLoop()
+
+    local pos = self.LastPos or self:GetPos()
 
     local ed1 = EffectData()
     ed1:SetOrigin(pos)
@@ -314,6 +319,7 @@ function ENT:PhysicsUpdate(phys)
     end
 
     local pos = self:GetPos()
+    self.LastPos = pos
 
     if CurTime() >= self.AltDriftNextPick then
         self.AltDriftTarget   = self.sky + math.Rand(-self.AltDriftRange, self.AltDriftRange)
@@ -934,5 +940,7 @@ end
 function ENT:OnRemove()
     if self.IdleLoop then self.IdleLoop:Stop() end
     if self.PlaneAmbientLoop then self.PlaneAmbientLoop:Stop() end
-    self:StopSprayLoop()
+    if not self.IsDestroyed then
+        self:StopSprayLoop()
+    end
 end
