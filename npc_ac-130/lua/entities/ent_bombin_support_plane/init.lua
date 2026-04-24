@@ -46,6 +46,7 @@ ENT.GAU_DamageMul       = 0.5
 ENT.GAU_RadiusMul       = 0.05
 ENT.GAU_SweepHalfLength = 600
 ENT.GAU_JitterAmount    = 200
+ENT.GAU_SpraySoundDelay = 2.4
 
 ENT.GAU_TargetOffsetMin = 300
 ENT.GAU_TargetOffsetMax = 900
@@ -164,8 +165,6 @@ function ENT:Initialize()
         self.PhysObj:EnableGravity(false)
     end
 
-    -- Anchor all looping sounds to self so they move with the plane
-    -- and are always audible at the correct world position
     self.IdleLoop = CreateSound(self, "ac-130_kill_sounds/AC130_idle_inside.mp3")
     if self.IdleLoop then
         self.IdleLoop:SetSoundLevel(60)
@@ -178,9 +177,7 @@ function ENT:Initialize()
         self.PlaneAmbientLoop:Play()
     end
 
-    -- SprayLoop created fresh each time spray is picked
-    self.SprayLoop       = nil
-    self.SprayLoopActive = false
+    self.NextSpraySoundTime = 0
 
     sound.Play(table.Random(PASS_SOUNDS), self.CenterPos, 75, 100, 0.7)
     self:Debug("Spawned at " .. tostring(spawnPos))
@@ -437,8 +434,9 @@ function ENT:PickNewWeapon(ct)
         self.NextShotTime105 = ct + 0.5
 
     elseif self.CurrentWeapon == "25mm_spray" then
-        self.NextShotTimeSpray = ct
-        self.SprayBulletCount  = 0
+        self.NextShotTimeSpray  = ct
+        self.NextSpraySoundTime = ct
+        self.SprayBulletCount   = 0
         local targetPos = self:GetTargetGroundPos()
         local sweepDir  = Vector(math.Rand(-1, 1), math.Rand(-1, 1), 0)
         if sweepDir:LengthSqr() < 0.01 then sweepDir = Vector(1, 0, 0) end
@@ -446,34 +444,25 @@ function ENT:PickNewWeapon(ct)
         self.GAU_SweepStartPos  = targetPos - sweepDir * self.GAU_SweepHalfLength
         self.GAU_SweepEndPos    = targetPos + sweepDir * self.GAU_SweepHalfLength
         self.GAU_SweepMuzzlePos = self:GetMuzzlePos()
-
-        self:StartSprayLoop(table.Random(GAU_BRRT_SOUNDS))
     end
 end
 
 -- ============================================================
--- SPRAY LOOP
--- Anchored to self so it tracks the plane position correctly.
+-- SPRAY SOUND / FLASH WINDOW
 -- ============================================================
 
 function ENT:StartSprayLoop(soundPath)
-    self:StopSprayLoop()
-    -- Anchor to self — CSoundPatch follows the entity in 3D space
-    self.SprayLoop = CreateSound(self, soundPath)
-    if self.SprayLoop then
-        self.SprayLoop:SetSoundLevel(100)
-        self.SprayLoop:Play()
-        self.SprayLoopActive = true
-        self:Debug("SprayLoop started: " .. soundPath)
-    end
+    self.NextSpraySoundTime = CurTime()
 end
 
 function ENT:StopSprayLoop()
-    if self.SprayLoop then
-        self.SprayLoop:Stop()
-        self.SprayLoop = nil
-    end
-    self.SprayLoopActive = false
+    self.NextSpraySoundTime = 0
+end
+
+function ENT:PlaySpraySoundAndFlash(ct)
+    sound.Play(table.Random(GAU_BRRT_SOUNDS), self.CenterPos, 110, math.random(96, 104), 1.0)
+    self:SpawnWeaponMuzzleFX("cball_explode", 1)
+    self.NextSpraySoundTime = ct + self.GAU_SpraySoundDelay
 end
 
 -- ============================================================
@@ -738,6 +727,10 @@ function ENT:Update25mmSpray(ct)
     if ct >= self.WeaponWindowEnd then
         self:StopSprayLoop()
         return
+    end
+
+    if self.NextSpraySoundTime > 0 and ct >= self.NextSpraySoundTime then
+        self:PlaySpraySoundAndFlash(ct)
     end
 
     if ct < self.NextShotTimeSpray then return end
