@@ -592,7 +592,7 @@ function ENT:SpawnGAUImpactFX(impactPos)
         net.WriteUInt(GAU_CAL_ID, 4)
     net.Broadcast()
 
-    sound.Play(table.Random(GAU_IMPACT_SOUNDS), impactPos, 75, math.random(95, 105), 0.8)
+    sound.Play(table.Random(GAU_IMPACT_SOUNDS), impactPos, 110, math.random(95, 105), 1.0)
 end
 
 function ENT:SpawnGAUHEIRound(impactPos)
