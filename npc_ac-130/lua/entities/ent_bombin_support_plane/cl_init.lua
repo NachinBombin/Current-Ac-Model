@@ -1,13 +1,10 @@
 include("shared.lua")
 
 -- ============================================================
--- PRECACHE — HL2 base .pcf files, always present in GMod
+-- PRECACHE
 -- ============================================================
 game.AddParticles("particles/fire_01.pcf")
-game.AddParticles("particles/fire_02.pcf")
-
 PrecacheParticleSystem("fire_medium_02")
-PrecacheParticleSystem("fire_large_02")
 
 -- ============================================================
 -- SOUND BROADCAST
@@ -23,22 +20,33 @@ end)
 
 -- ============================================================
 -- DAMAGE STATE VISUALS
--- Tier 0 = healthy   (no FX)
--- Tier 1 = <= 75% HP (1 fire)
--- Tier 2 = <= 50% HP (2 fire)
--- Tier 3 = <= 25% HP (3 fire)
+-- Only fire_medium_02 is used (confirmed working in tier 1).
+-- Each tier adds more emitters spread across the airframe.
+-- Tier 1: 1 emitter  (centre fuselage)
+-- Tier 2: 3 emitters (centre + both wing roots)
+-- Tier 3: 5 emitters (centre + wings + nose + tail)
 -- ============================================================
 
-local FIRE_SYSTEMS = { "fire_medium_02", "fire_large_02", "fire_large_02" }
+local TIER_OFFSETS = {
+    [1] = {
+        Vector(  0,   0,  20),
+    },
+    [2] = {
+        Vector(  0,   0,  20),
+        Vector( 90,   0,   0),
+        Vector(-90,   0,   0),
+    },
+    [3] = {
+        Vector(  0,   0,  20),
+        Vector( 90,   0,   0),
+        Vector(-90,   0,   0),
+        Vector(  0, 130,  10),
+        Vector(  0,-130,  10),
+    },
+}
 
 local TIER_BURST_DELAY = { [1] = 4.0, [2] = 2.0, [3] = 0.8 }
 local TIER_BURST_COUNT = { [1] = 1,   [2] = 2,   [3] = 4   }
-
-local FIRE_OFFSETS = {
-    Vector(  0,    0,  20),
-    Vector( 90,    0,   0),
-    Vector(-90,    0,   0),
-}
 
 local PlaneStates = {}
 
@@ -50,13 +58,10 @@ local function SpawnBurstFX(ent, count)
     local pos = ent:GetPos()
     local ang = ent:GetAngles()
     for _ = 1, count do
-        local lOff = Vector(
-            math.Rand(-120, 120),
-            math.Rand(-150,  80),
-            math.Rand(   0,  30)
+        local wPos = LocalToWorld(
+            Vector(math.Rand(-120,120), math.Rand(-150,80), math.Rand(0,30)),
+            Angle(0,0,0), pos, ang
         )
-        local wPos = LocalToWorld(lOff, Angle(0,0,0), pos, ang)
-
         local ed = EffectData()
         ed:SetOrigin(wPos)
         ed:SetScale(math.Rand(0.5, 1.0))
@@ -80,9 +85,7 @@ end
 local function StopParticles(state)
     if not state.particles then return end
     for _, p in ipairs(state.particles) do
-        if IsValid(p) then
-            p:StopEmission()
-        end
+        if IsValid(p) then p:StopEmission() end
     end
     state.particles = {}
 end
@@ -90,15 +93,13 @@ end
 local function ApplyFlameParticles(ent, state, tier)
     StopParticles(state)
     state.tier = tier
-
     if not IsValid(ent) or tier == 0 then return end
 
-    for i = 1, tier do
-        local pName = FIRE_SYSTEMS[i] or FIRE_SYSTEMS[#FIRE_SYSTEMS]
-        local p = ent:CreateParticleEffect(pName, PATTACH_ABSORIGIN_FOLLOW, 0)
+    local offsets = TIER_OFFSETS[tier]
+    for i = 1, #offsets do
+        local p = ent:CreateParticleEffect("fire_medium_02", PATTACH_ABSORIGIN_FOLLOW, 0)
         if IsValid(p) then
-            local off = FIRE_OFFSETS[i] or Vector(0,0,0)
-            p:SetControlPoint(0, ent:LocalToWorld(off))
+            p:SetControlPoint(0, ent:LocalToWorld(offsets[i]))
             table.insert(state.particles, p)
         end
     end
@@ -112,8 +113,7 @@ end
 net.Receive("bombin_plane_damage_tier", function()
     local entIndex = net.ReadUInt(16)
     local tier     = net.ReadUInt(2)
-
-    local ent = Entity(entIndex)
+    local ent      = Entity(entIndex)
 
     local state = PlaneStates[entIndex]
     if not state then
@@ -125,9 +125,7 @@ net.Receive("bombin_plane_damage_tier", function()
 
     if IsValid(ent) then
         ApplyFlameParticles(ent, state, tier)
-        if tier > 0 then
-            SpawnBurstFX(ent, TIER_BURST_COUNT[tier] or 1)
-        end
+        if tier > 0 then SpawnBurstFX(ent, TIER_BURST_COUNT[tier] or 1) end
     else
         state.tier         = tier
         state.pendingApply = true
@@ -151,13 +149,12 @@ hook.Add("Think", "bombin_plane_damage_fx", function()
             end
 
             if state.tier > 0 then
-                local pos = ent:GetPos()
-                local ang = ent:GetAngles()
-                for i = 1, state.tier do
-                    local p = state.particles[i]
-                    if IsValid(p) then
-                        local off = FIRE_OFFSETS[i] or Vector(0,0,0)
-                        p:SetControlPoint(0, LocalToWorld(off, Angle(0,0,0), pos, ang))
+                local pos     = ent:GetPos()
+                local ang     = ent:GetAngles()
+                local offsets = TIER_OFFSETS[state.tier]
+                for i, p in ipairs(state.particles) do
+                    if IsValid(p) and offsets[i] then
+                        p:SetControlPoint(0, LocalToWorld(offsets[i], Angle(0,0,0), pos, ang))
                     end
                 end
 
