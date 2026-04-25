@@ -22,12 +22,13 @@ local PASS_SOUNDS = {
     "killstreak_rewards/ac-130_25mm_fire.wav",
 }
 
+-- Vanilla GMod bullet impact sounds - no custom files needed
 local GAU_IMPACT_SOUNDS = {
-    "gredwitch/impacts/bullet_impact_dirt_01.wav",
-    "gredwitch/impacts/bullet_impact_dirt_02.wav",
-    "gredwitch/impacts/bullet_impact_dirt_03.wav",
-    "gredwitch/impacts/bullet_impact_concrete_01.wav",
-    "gredwitch/impacts/bullet_impact_concrete_02.wav",
+    "physics/concrete/impact_concrete_bullet1.wav",
+    "physics/concrete/impact_concrete_bullet2.wav",
+    "physics/concrete/impact_concrete_bullet3.wav",
+    "physics/dirt/impact_dirt_bullet1.wav",
+    "physics/dirt/impact_dirt_bullet2.wav",
 }
 
 local GAU_BRRT_SOUNDS = {
@@ -200,23 +201,22 @@ function ENT:Initialize()
     self.PlaneAmbientLoop = CreateSound(self, self.Plane_Ambient_SoundPath)
     if self.PlaneAmbientLoop then self.PlaneAmbientLoop:SetSoundLevel(80) self.PlaneAmbientLoop:Play() end
 
-    -- Weapon state
-    self.CurrentWeapon     = nil
-    self.WeaponWindowEnd   = 0
-    self.NextShotTime40    = 0
-    self.NextShotTime105   = 0
-    self.NextShotTimeSpray = 0
-    self.SprayBulletCount  = 0
+    self.CurrentWeapon      = nil
+    self.WeaponWindowEnd    = 0
+    self.NextShotTime40     = 0
+    self.NextShotTime105    = 0
+    self.NextShotTimeSpray  = 0
+    self.SprayBulletCount   = 0
     self.NextSpraySoundTime = 0
-    self.GAU_BurstTimes    = {}
-    self.GAU_BurstsFired   = 0
-    self.GAU_ActiveBursts  = {}   -- cleared on every PickNewWeapon; only consumed by 25mm slot
-    self.GAU_SweepStartPos = nil
-    self.GAU_SweepEndPos   = nil
-    self.GAU_SprayTarget   = nil  -- fixed target for the entire spray window
-    self.MuzzleIndexGlobal = 1
-    self.MuzzleIndexWeapon = 1
-    self.IsDestroyed       = false
+    self.GAU_BurstTimes     = {}
+    self.GAU_BurstsFired    = 0
+    self.GAU_ActiveBursts   = {}
+    self.GAU_SweepStartPos  = nil
+    self.GAU_SweepEndPos    = nil
+    self.GAU_SprayTarget    = nil
+    self.MuzzleIndexGlobal  = 1
+    self.MuzzleIndexWeapon  = 1
+    self.IsDestroyed        = false
 
     NetSound(table.Random(PASS_SOUNDS), self.CenterPos, 110, 100, 1.0)
     self:Debug("Spawned at " .. tostring(spawnPos))
@@ -239,18 +239,18 @@ end
 function ENT:DestroyPlane()
     if self.IsDestroyed then return end
     self.IsDestroyed = true
-    if self.IdleLoop        then self.IdleLoop:Stop()        end
+    if self.IdleLoop         then self.IdleLoop:Stop()         end
     if self.PlaneAmbientLoop then self.PlaneAmbientLoop:Stop() end
 
     local pos = self.LastPos or self:GetPos()
     local function FX(name, o, sc)
-        local ed = EffectData() ed:SetOrigin(o) ed:SetScale(sc) ed:SetMagnitude(sc) ed:SetRadius(sc * 100)
+        local ed = EffectData() ed:SetOrigin(o) ed:SetScale(sc) ed:SetMagnitude(sc) ed:SetRadius(sc*100)
         util.Effect(name, ed, true, true)
     end
-    FX("HelicopterMegaBomb", pos,                    6)
-    FX("500lb_air",          pos,                    5)
-    FX("500lb_air",          pos + Vector(0,0,80),   4)
-    FX("500lb_air",          pos + Vector(0,0,180),  3)
+    FX("HelicopterMegaBomb", pos,                   6)
+    FX("500lb_air",          pos,                   5)
+    FX("500lb_air",          pos + Vector(0,0,80),  4)
+    FX("500lb_air",          pos + Vector(0,0,180), 3)
     NetSound("ambient/explosions/explode_8.wav", pos, 140, 90, 1.0)
     NetSound("weapon_AWP.Single",               pos, 145, 60, 1.0)
     util.BlastDamage(self, self, pos, 400, 200)
@@ -276,8 +276,6 @@ function ENT:Think()
 
     self:HandleWeaponWindow(ct)
 
-    -- GAU burst ticking: ONLY when the current weapon is 25mm burst.
-    -- Cleared on every weapon switch so there is zero bleed into other windows.
     if self.CurrentWeapon == "25mm" then
         self:UpdateActiveGAUBursts(ct)
     end
@@ -358,12 +356,11 @@ function ENT:HandleWeaponWindow(ct)
 end
 
 function ENT:PickNewWeapon(ct)
-    -- Hard-clear all burst state so nothing bleeds into the next window
-    self.GAU_ActiveBursts  = {}
-    self.GAU_BurstTimes    = {}
-    self.GAU_BurstsFired   = 0
+    self.GAU_ActiveBursts   = {}
+    self.GAU_BurstTimes     = {}
+    self.GAU_BurstsFired    = 0
     self.NextSpraySoundTime = 0
-    self.GAU_SprayTarget   = nil
+    self.GAU_SprayTarget    = nil
 
     local roll = math.random(1, 4)
     if     roll == 1 then self.CurrentWeapon = "25mm"
@@ -375,7 +372,6 @@ function ENT:PickNewWeapon(ct)
     self.WeaponWindowEnd = ct + self.WeaponWindow
     self:Debug("Weapon: " .. self.CurrentWeapon)
 
-    -- Advance the muzzle point round-robin
     local muzzleCount      = #self.MuzzlePoints
     self.MuzzleIndexWeapon = self.MuzzleIndexGlobal
     self.MuzzleIndexGlobal = (self.MuzzleIndexGlobal % muzzleCount) + 1
@@ -391,11 +387,9 @@ function ENT:PickNewWeapon(ct)
 
     elseif self.CurrentWeapon == "25mm_spray" then
         self.NextShotTimeSpray  = ct
-        self.NextSpraySoundTime = ct        -- first sound+flash fires immediately
+        self.NextSpraySoundTime = ct
         self.SprayBulletCount   = 0
-        -- Lock a single target for the whole spray window; jitter is applied per-bullet
         self.GAU_SprayTarget    = self:GetPrimaryTargetPos()
-        -- Sweep geometry
         local sweepDir = Vector(math.Rand(-1,1), math.Rand(-1,1), 0)
         if sweepDir:LengthSqr() < 0.01 then sweepDir = Vector(1,0,0) end
         sweepDir:Normalize()
@@ -408,7 +402,6 @@ end
 -- TARGET / MUZZLE HELPERS
 -- ============================================================
 
--- Returns the raw player position (no random offset) for locking spray target
 function ENT:GetPrimaryTargetPos()
     local closest, closestDist = nil, math.huge
     for _, ply in ipairs(player.GetAll()) do
@@ -417,7 +410,6 @@ function ENT:GetPrimaryTargetPos()
         if d < closestDist then closestDist = d closest = ply end
     end
     if IsValid(closest) then return closest:GetPos() end
-    -- No players: drop to ground under center
     return util.QuickTrace(
         Vector(self.CenterPos.x, self.CenterPos.y, self.sky),
         Vector(0, 0, -30000), self
@@ -464,7 +456,6 @@ function ENT:SpawnGAUImpactFX(impactPos)
     ed2:SetOrigin(impactPos) ed2:SetScale(0.5) ed2:SetMagnitude(0.5) ed2:SetRadius(4)
     util.Effect("Sparks", ed2, true, true)
 
-    -- Only broadcast the gred impact net message when gred is loaded
     if HasGred() then
         net.Start("gred_net_createimpact")
             net.WriteVector(impactPos)
@@ -474,8 +465,9 @@ function ENT:SpawnGAUImpactFX(impactPos)
         net.Broadcast()
     end
 
-    -- Impact sound via our own pooled net message — always safe
-    NetSound(table.Random(GAU_IMPACT_SOUNDS), impactPos, 90, math.random(95, 105), 0.8)
+    -- util.EmitSound is server-side and automatically networked to nearby clients.
+    -- No custom net messages, no prefix issues.
+    util.EmitSound(table.Random(GAU_IMPACT_SOUNDS), impactPos, -1, CHAN_AUTO, 1.0, 80, 0, math.random(95, 105))
 end
 
 function ENT:SpawnGAUHEIRound(impactPos)
@@ -580,19 +572,16 @@ end
 -- ============================================================
 
 function ENT:Update25mmSpray(ct)
-    -- Sound+flash tick: fires every GAU_SpraySoundDelay seconds
     if self.NextSpraySoundTime > 0 and ct >= self.NextSpraySoundTime then
         NetSound(table.Random(GAU_BRRT_SOUNDS), self.CenterPos, 110, math.random(96, 104), 1.0)
         self:SpawnWeaponMuzzleFX("cball_explode", 1)
         self.NextSpraySoundTime = ct + self.GAU_SpraySoundDelay
     end
 
-    -- Bullet tick: fires every GAU_Spray_Delay seconds (fast, independent of sound)
     if ct < self.NextShotTimeSpray then return end
     self.NextShotTimeSpray = ct + self.GAU_Spray_Delay
     self.SprayBulletCount  = self.SprayBulletCount + 1
 
-    -- Use the locked spray target + per-bullet jitter (no re-rolling target each bullet)
     local target = self.GAU_SprayTarget or self:GetPrimaryTargetPos()
     local jitter = self.GAU_JitterAmount * 2
     self:FireGAUBulletAt(
