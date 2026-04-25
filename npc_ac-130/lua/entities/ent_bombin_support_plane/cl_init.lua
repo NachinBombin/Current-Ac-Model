@@ -5,13 +5,9 @@ include("shared.lua")
 -- ============================================================
 game.AddParticles("particles/fire_01.pcf")
 game.AddParticles("particles/fire_02.pcf")
-game.AddParticles("particles/smoke_01.pcf")
-game.AddParticles("particles/smoke_02.pcf")
 
 PrecacheParticleSystem("fire_medium_02")
 PrecacheParticleSystem("fire_large_02")
-PrecacheParticleSystem("smoke_stack")
-PrecacheParticleSystem("smoke_exhaust")
 
 -- ============================================================
 -- SOUND BROADCAST
@@ -27,14 +23,13 @@ end)
 
 -- ============================================================
 -- DAMAGE STATE VISUALS
--- ============================================================
 -- Tier 0 = healthy   (no FX)
--- Tier 1 = <= 75% HP (1 fire + 1 smoke)
--- Tier 2 = <= 50% HP (2 fire + 2 smoke)
--- Tier 3 = <= 25% HP (3 fire + 3 smoke)
+-- Tier 1 = <= 75% HP (1 fire)
+-- Tier 2 = <= 50% HP (2 fire)
+-- Tier 3 = <= 25% HP (3 fire)
+-- ============================================================
 
-local FIRE_SYSTEMS  = { "fire_medium_02", "fire_large_02", "fire_large_02" }
-local SMOKE_SYSTEMS = { "smoke_stack",    "smoke_stack",   "smoke_exhaust"  }
+local FIRE_SYSTEMS = { "fire_medium_02", "fire_large_02", "fire_large_02" }
 
 local TIER_BURST_DELAY = { [1] = 4.0, [2] = 2.0, [3] = 0.8 }
 local TIER_BURST_COUNT = { [1] = 1,   [2] = 2,   [3] = 4   }
@@ -43,11 +38,6 @@ local FIRE_OFFSETS = {
     Vector(  0,    0,  20),
     Vector( 90,    0,   0),
     Vector(-90,    0,   0),
-}
-local SMOKE_OFFSETS = {
-    Vector(  0, -130,  30),
-    Vector( 60,  -80,  10),
-    Vector(-60,  -80,  10),
 }
 
 local PlaneStates = {}
@@ -113,16 +103,6 @@ local function ApplyFlameParticles(ent, state, tier)
         end
     end
 
-    for i = 1, tier do
-        local pName = SMOKE_SYSTEMS[i] or SMOKE_SYSTEMS[#SMOKE_SYSTEMS]
-        local p = ent:CreateParticleEffect(pName, PATTACH_ABSORIGIN_FOLLOW, 0)
-        if IsValid(p) then
-            local off = SMOKE_OFFSETS[i] or Vector(0,0,0)
-            p:SetControlPoint(0, ent:LocalToWorld(off))
-            table.insert(state.particles, p)
-        end
-    end
-
     state.nextBurst = CurTime() + (TIER_BURST_DELAY[tier] or 4)
 end
 
@@ -173,22 +153,12 @@ hook.Add("Think", "bombin_plane_damage_fx", function()
             if state.tier > 0 then
                 local pos = ent:GetPos()
                 local ang = ent:GetAngles()
-                local pi  = 1
                 for i = 1, state.tier do
-                    local p = state.particles[pi]
+                    local p = state.particles[i]
                     if IsValid(p) then
                         local off = FIRE_OFFSETS[i] or Vector(0,0,0)
                         p:SetControlPoint(0, LocalToWorld(off, Angle(0,0,0), pos, ang))
                     end
-                    pi = pi + 1
-                end
-                for i = 1, state.tier do
-                    local p = state.particles[pi]
-                    if IsValid(p) then
-                        local off = SMOKE_OFFSETS[i] or Vector(0,0,0)
-                        p:SetControlPoint(0, LocalToWorld(off, Angle(0,0,0), pos, ang))
-                    end
-                    pi = pi + 1
                 end
 
                 if ct >= state.nextBurst then
