@@ -2,8 +2,22 @@ AddCSLuaFile("cl_init.lua")
 AddCSLuaFile("shared.lua")
 include("shared.lua")
 
+-- net string registered in npc_bombin_support_plane.lua autorun
+-- util.AddNetworkString("bombin_plane_sound") -- already done in autorun
+
 local function HasGred()
     return gred and gred.CreateBullet and gred.CreateShell
+end
+
+-- Helper: broadcast a sound to all clients (plays client-side at the given world pos)
+local function NetSound(path, pos, level, pitch, volume)
+    net.Start("bombin_plane_sound")
+        net.WriteString(path)
+        net.WriteVector(pos)
+        net.WriteUInt(level, 8)
+        net.WriteUInt(pitch, 8)
+        net.WriteFloat(volume)
+    net.Broadcast()
 end
 
 local PASS_SOUNDS = {
@@ -179,7 +193,7 @@ function ENT:Initialize()
 
     self.NextSpraySoundTime = 0
 
-    sound.Play(table.Random(PASS_SOUNDS), self.CenterPos, 75, 100, 0.7)
+    NetSound(table.Random(PASS_SOUNDS), self.CenterPos, 110, 100, 1.0)
     self:Debug("Spawned at " .. tostring(spawnPos))
 
     self.CurrentWeapon      = nil
@@ -258,8 +272,8 @@ function ENT:DestroyPlane()
     ed4:SetScale(3) ed4:SetMagnitude(3) ed4:SetRadius(300)
     util.Effect("500lb_air", ed4, true, true)
 
-    sound.Play("ambient/explosions/explode_8.wav", pos, 140, 90,  1.0)
-    sound.Play("weapon_AWP.Single",               pos, 145, 60,  1.0)
+    NetSound("ambient/explosions/explode_8.wav", pos, 140, 90,  1.0)
+    NetSound("weapon_AWP.Single",               pos, 145, 60,  1.0)
 
     util.BlastDamage(self, self, pos, 400, 200)
 
@@ -292,7 +306,7 @@ function ENT:Think()
     end
 
     if ct >= self.NextPassSound then
-        sound.Play(table.Random(PASS_SOUNDS), self.CenterPos, 75, math.random(96, 104), 0.7)
+        NetSound(table.Random(PASS_SOUNDS), self.CenterPos, 110, math.random(96, 104), 1.0)
         self.NextPassSound = ct + math.Rand(4, 7)
     end
 
@@ -451,16 +465,12 @@ end
 -- SPRAY SOUND / FLASH WINDOW
 -- ============================================================
 
-function ENT:StartSprayLoop(soundPath)
-    self.NextSpraySoundTime = CurTime()
-end
-
 function ENT:StopSprayLoop()
     self.NextSpraySoundTime = 0
 end
 
 function ENT:PlaySpraySoundAndFlash(ct)
-    sound.Play(table.Random(GAU_BRRT_SOUNDS), self.CenterPos, 110, math.random(96, 104), 1.0)
+    NetSound(table.Random(GAU_BRRT_SOUNDS), self.CenterPos, 110, math.random(96, 104), 1.0)
     self:SpawnWeaponMuzzleFX("cball_explode", 1)
     self.NextSpraySoundTime = ct + self.GAU_SpraySoundDelay
 end
@@ -592,7 +602,8 @@ function ENT:SpawnGAUImpactFX(impactPos)
         net.WriteUInt(GAU_CAL_ID, 4)
     net.Broadcast()
 
-    sound.Play(table.Random(GAU_IMPACT_SOUNDS), impactPos, 110, math.random(95, 105), 1.0)
+    -- Use NetSound so clients play this at the impact position regardless of distance
+    NetSound(table.Random(GAU_IMPACT_SOUNDS), impactPos, 110, math.random(95, 105), 1.0)
 end
 
 function ENT:SpawnGAUHEIRound(impactPos)
@@ -685,7 +696,7 @@ function ENT:StartGAUBurst()
     table.insert(self.GAU_ActiveBursts, { bulletsFired = 0, nextTime = CurTime() })
 
     self:SpawnWeaponMuzzleFX("cball_explode", 1)
-    sound.Play(table.Random(GAU_BRRT_SOUNDS), self.CenterPos, 110, math.random(96, 104), 1.0)
+    NetSound(table.Random(GAU_BRRT_SOUNDS), self.CenterPos, 110, math.random(96, 104), 1.0)
 end
 
 function ENT:UpdateActiveGAUBursts(ct)
@@ -795,7 +806,7 @@ function ENT:Update40mm(ct)
     end
 
     self:SpawnWeaponMuzzleFX("cball_explode", 2)
-    sound.Play("killstreak_rewards/ac-130_40mm_fire.wav", self.CenterPos, 110, math.random(96, 104), 1.0)
+    NetSound("killstreak_rewards/ac-130_40mm_fire.wav", self.CenterPos, 110, math.random(96, 104), 1.0)
 end
 
 -- ============================================================
@@ -898,7 +909,7 @@ function ENT:Update105mm(ct)
     end
 
     self:SpawnWeaponMuzzleFX("cball_explode", 3)
-    sound.Play("killstreak_rewards/ac-130_105mm_fire.wav", self.CenterPos, 110, math.random(96, 104), 1.0)
+    NetSound("killstreak_rewards/ac-130_105mm_fire.wav", self.CenterPos, 110, math.random(96, 104), 1.0)
 end
 
 -- ============================================================
