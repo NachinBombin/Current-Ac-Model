@@ -12,12 +12,18 @@ local PASS_SOUNDS = {
     "killstreak_rewards/ac-130_25mm_fire.wav",
 }
 
+-- Standard HL2 bullet impact sounds guaranteed to exist in every GMod install.
+-- The original paths (gredwitch/impacts/...) are not shipped with this addon.
 local GAU_IMPACT_SOUNDS = {
-    "gredwitch/impacts/bullet_impact_dirt_01.wav",
-    "gredwitch/impacts/bullet_impact_dirt_02.wav",
-    "gredwitch/impacts/bullet_impact_dirt_03.wav",
-    "gredwitch/impacts/bullet_impact_concrete_01.wav",
-    "gredwitch/impacts/bullet_impact_concrete_02.wav",
+    "physics/concrete/impact_bullet1.wav",
+    "physics/concrete/impact_bullet2.wav",
+    "physics/concrete/impact_bullet3.wav",
+    "physics/dirt/impact_bullet1.wav",
+    "physics/dirt/impact_bullet2.wav",
+    "physics/dirt/impact_bullet3.wav",
+    "physics/metal/metal_solid_impact_bullet1.wav",
+    "physics/metal/metal_solid_impact_bullet2.wav",
+    "physics/metal/metal_solid_impact_bullet3.wav",
 }
 
 local GAU_BRRT_SOUNDS = {

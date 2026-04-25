@@ -55,10 +55,6 @@ local function apply_impact_fx(tr)
     eff_SetHitBox(ed,  tr.HitBoxBone or 0)
     eff_SetDmgType(ed, DMG_BULLET)
     util_Effect("Impact", ed)
-    -- Play the surface-appropriate bullet impact sound.
-    -- util.Effect("ImpactSound") reads SurfaceProp and plays the correct sound
-    -- exactly as the engine would for a native hitscan bullet.
-    util_Effect("ImpactSound", ed)
 end
 
 local function apply_damage(proj, tr, shooter)
