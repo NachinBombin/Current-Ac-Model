@@ -448,8 +448,7 @@ function ENT:PickNewWeapon(ct)
         self.NextShotTimeSpray  = ct
         self.NextSpraySoundTime = ct
         self.SprayBulletCount   = 0
-        -- Sweep is centered on the player directly; offset used only when no target
-        local targetPos = self:GetGAUGroundPos()
+        local targetPos = self:GetTargetGroundPos()
         local sweepDir  = Vector(math.Rand(-1, 1), math.Rand(-1, 1), 0)
         if sweepDir:LengthSqr() < 0.01 then sweepDir = Vector(1, 0, 0) end
         sweepDir:Normalize()
@@ -497,30 +496,6 @@ function ENT:GetPrimaryTarget()
     return closest
 end
 
--- GetGAUGroundPos: aim at the player's feet directly.
--- The large scatter offset (300-900 HU) is only applied when
--- there is no live player — it was always firing that far away before.
-function ENT:GetGAUGroundPos()
-    local target = self:GetPrimaryTarget()
-    if IsValid(target) then
-        return target:GetPos()
-    end
-
-    -- No player — scatter around center
-    local tr = util.QuickTrace(
-        Vector(self.CenterPos.x, self.CenterPos.y, self.sky),
-        Vector(0, 0, -30000),
-        self
-    )
-    local basePos    = tr.HitPos
-    local offsetDist = math.Rand(self.GAU_TargetOffsetMin, self.GAU_TargetOffsetMax)
-    local offsetDir  = Vector(math.Rand(-1, 1), math.Rand(-1, 1), 0)
-    if offsetDir:LengthSqr() < 0.01 then offsetDir = Vector(1, 0, 0) end
-    offsetDir:Normalize()
-    return basePos + offsetDir * offsetDist
-end
-
--- GetTargetGroundPos kept for 40mm / 105mm scatter behaviour
 function ENT:GetTargetGroundPos()
     local target  = self:GetPrimaryTarget()
     local basePos
@@ -662,13 +637,13 @@ end
 -- ============================================================
 
 function ENT:FireGAUBulletAt(impactPos, bulletIndex)
-    -- Trace from sky straight down through the impact column.
-    -- traceEnd must reach ABOVE the ground target so the trace
-    -- passes through any entity standing there (player height ~72 HU).
-    -- Previously traceEnd was impactPos.z - 64 which put the endpoint
-    -- BELOW the floor, so the trace only ever returned a world hit.
+    -- Trace straight down from sky to the target ground position.
+    -- impactPos is already a ground-level XY coordinate with the
+    -- correct Z from GetTargetGroundPos (player:GetPos() or world hit).
+    -- We start well above it and end well below it so the trace
+    -- passes cleanly through any entity standing at that spot.
     local traceStart = Vector(impactPos.x, impactPos.y, self.sky + 100)
-    local traceEnd   = Vector(impactPos.x, impactPos.y, impactPos.z + 72)
+    local traceEnd   = Vector(impactPos.x, impactPos.y, impactPos.z - 128)
 
     local tr = util.TraceLine({
         start  = traceStart,
@@ -677,10 +652,13 @@ function ENT:FireGAUBulletAt(impactPos, bulletIndex)
         mask   = MASK_SHOT,
     })
 
-    -- Play effects at the actual hit position
+    -- Spawn visual effects at the real hit position
     self:SpawnGAUImpactFX(tr.HitPos)
 
-    -- Damage any entity the trace hit, not just players/NPCs
+    -- Damage whatever the trace hit.
+    -- We do NOT gate on IsPlayer/IsNPC so SNPCs, vehicles, and props
+    -- are all valid targets. The world brush is never valid so a ground
+    -- hit does no damage, which is the correct behaviour.
     if tr.Hit and IsValid(tr.Entity) and tr.Entity ~= self then
         local dmginfo = DamageInfo()
         dmginfo:SetAttacker(self)
@@ -714,8 +692,7 @@ function ENT:Update25mmBurstsSchedule(ct)
 end
 
 function ENT:StartGAUBurst()
-    -- Aim burst at player directly; scatter is applied per-bullet in FireSingleGAUBullet
-    local targetPos = self:GetGAUGroundPos()
+    local targetPos = self:GetTargetGroundPos()
     local muzzlePos = self:GetMuzzlePos()
 
     local sweepDir = Vector(math.Rand(-1, 1), math.Rand(-1, 1), 0)
@@ -782,8 +759,7 @@ function ENT:Update25mmSpray(ct)
     self.NextShotTimeSpray = ct + self.GAU_Spray_Delay
     self.SprayBulletCount  = self.SprayBulletCount + 1
 
-    -- Aim at player directly; only scatter when no player present
-    local targetPos   = self:GetGAUGroundPos()
+    local targetPos   = self:GetTargetGroundPos()
     local finalImpact = targetPos + Vector(
         math.Rand(-self.GAU_JitterAmount * 2, self.GAU_JitterAmount * 2),
         math.Rand(-self.GAU_JitterAmount * 2, self.GAU_JitterAmount * 2),
