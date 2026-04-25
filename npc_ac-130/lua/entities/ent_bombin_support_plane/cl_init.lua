@@ -123,8 +123,7 @@ local function StopParticles(state)
     for _, p in ipairs(state.particles) do
         if IsValid(p) then
             p:StopEmission()
-            p:SetDormant(true)
-            p:Release()
+            p:Destroy()
         end
     end
     state.particles = {}
