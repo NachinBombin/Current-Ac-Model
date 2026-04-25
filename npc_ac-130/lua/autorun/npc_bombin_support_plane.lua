@@ -1,6 +1,7 @@
 if SERVER then
 	AddCSLuaFile()
 	util.AddNetworkString("BombinSupportPlane_FlareSpawned")
+	util.AddNetworkString("bombin_plane_sound")
 -- Server-side only
 if SERVER then
 	-- Tunable overkill values

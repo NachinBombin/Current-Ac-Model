@@ -2,14 +2,11 @@ AddCSLuaFile("cl_init.lua")
 AddCSLuaFile("shared.lua")
 include("shared.lua")
 
--- net string registered in npc_bombin_support_plane.lua autorun
--- util.AddNetworkString("bombin_plane_sound") -- already done in autorun
-
 local function HasGred()
     return gred and gred.CreateBullet and gred.CreateShell
 end
 
--- Helper: broadcast a sound to all clients (plays client-side at the given world pos)
+-- Broadcast a sound to all clients so it plays at the world pos regardless of distance
 local function NetSound(path, pos, level, pitch, volume)
     net.Start("bombin_plane_sound")
         net.WriteString(path)
@@ -43,52 +40,75 @@ local GAU_BRRT_SOUNDS = {
 
 local GAU_CAL_ID = 3
 
+-- Default values used as fallbacks if self.* is nil at call time
+local DEFAULT_WEAPON_WINDOW        = 10
+local DEFAULT_GAU_FIRST_BURST      = 0
+local DEFAULT_GAU_SECOND_BURST     = 5
+local DEFAULT_GAU_BURST_COUNT      = 25
+local DEFAULT_GAU_BURST_DELAY      = 0.033
+local DEFAULT_GAU_SWEEP_HALF       = 600
+local DEFAULT_GAU_JITTER           = 200
+local DEFAULT_GAU_SPRAY_SOUND_DLY  = 2.4
+local DEFAULT_GAU_TARGET_OFF_MIN   = 300
+local DEFAULT_GAU_TARGET_OFF_MAX   = 900
+local DEFAULT_GAU_HEI_INTERVAL     = 20
+local DEFAULT_GAU_BULLET_DAMAGE    = 40
+local DEFAULT_GUN40_DELAY          = 0.5
+local DEFAULT_GUN105_DELAY         = 6
+local DEFAULT_GUN40_VEL            = 6000
+local DEFAULT_GUN105_VEL           = 5000
+local DEFAULT_GUN40_DMG            = 300
+local DEFAULT_GUN105_DMG           = 3700
+local DEFAULT_GUN40_TNT            = 0.5
+local DEFAULT_GUN105_TNT           = 2.5
+local DEFAULT_GUN40_SCATTER        = 600
+local DEFAULT_GUN105_SCATTER       = 400
+local DEFAULT_GAU_SPRAY_DELAY      = 0.033
+local DEFAULT_MUZZLE_FWD           = 250
+local DEFAULT_MUZZLE_SIDE          = -60
+
 function ENT:Debug(msg)
     print("[Bombin Support Plane ENT] " .. msg)
 end
 
-ENT.WeaponWindow        = 10
+ENT.WeaponWindow        = DEFAULT_WEAPON_WINDOW
 ENT.AimConeDegrees      = 10
 
-ENT.GAU_FirstBurstTime  = 0
-ENT.GAU_SecondBurstTime = 5
-ENT.GAU_BurstCount      = 25
-ENT.GAU_BurstDelay      = 0.033
+ENT.GAU_FirstBurstTime  = DEFAULT_GAU_FIRST_BURST
+ENT.GAU_SecondBurstTime = DEFAULT_GAU_SECOND_BURST
+ENT.GAU_BurstCount      = DEFAULT_GAU_BURST_COUNT
+ENT.GAU_BurstDelay      = DEFAULT_GAU_BURST_DELAY
 ENT.GAU_Caliber         = "wac_base_20mm"
 ENT.GAU_TracerColor     = nil
 ENT.GAU_DamageMul       = 0.5
 ENT.GAU_RadiusMul       = 0.05
-ENT.GAU_SweepHalfLength = 600
-ENT.GAU_JitterAmount    = 200
-ENT.GAU_SpraySoundDelay = 2.4
+ENT.GAU_SweepHalfLength = DEFAULT_GAU_SWEEP_HALF
+ENT.GAU_JitterAmount    = DEFAULT_GAU_JITTER
+ENT.GAU_SpraySoundDelay = DEFAULT_GAU_SPRAY_SOUND_DLY
 
-ENT.GAU_TargetOffsetMin = 300
-ENT.GAU_TargetOffsetMax = 900
+ENT.GAU_TargetOffsetMin = DEFAULT_GAU_TARGET_OFF_MIN
+ENT.GAU_TargetOffsetMax = DEFAULT_GAU_TARGET_OFF_MAX
 
-ENT.GAU_HEI_Interval    = 20
-ENT.GAU_BulletDamage    = 40
+ENT.GAU_HEI_Interval    = DEFAULT_GAU_HEI_INTERVAL
+ENT.GAU_BulletDamage    = DEFAULT_GAU_BULLET_DAMAGE
 
-ENT.GUN40_Delay          = 0.5
-ENT.GUN105_Delay         = 6
-ENT.GUN40_ShellVelocity  = 6000
-ENT.GUN105_ShellVelocity = 5000
-ENT.GUN40_Damage         = 300
-ENT.GUN105_Damage        = 3700
-ENT.GUN40_TNT            = 0.5
-ENT.GUN105_TNT           = 2.5
+ENT.GUN40_Delay          = DEFAULT_GUN40_DELAY
+ENT.GUN105_Delay         = DEFAULT_GUN105_DELAY
+ENT.GUN40_ShellVelocity  = DEFAULT_GUN40_VEL
+ENT.GUN105_ShellVelocity = DEFAULT_GUN105_VEL
+ENT.GUN40_Damage         = DEFAULT_GUN40_DMG
+ENT.GUN105_Damage        = DEFAULT_GUN105_DMG
+ENT.GUN40_TNT            = DEFAULT_GUN40_TNT
+ENT.GUN105_TNT           = DEFAULT_GUN105_TNT
 
-ENT.GUN40_Scatter        = 600
-ENT.GUN105_Scatter       = 400
+ENT.GUN40_Scatter        = DEFAULT_GUN40_SCATTER
+ENT.GUN105_Scatter       = DEFAULT_GUN105_SCATTER
 
-ENT.GAU_Spray_Delay      = 0.033
+ENT.GAU_Spray_Delay      = DEFAULT_GAU_SPRAY_DELAY
 
-ENT.MuzzleForwardOffset  = 250
-ENT.MuzzleSideOffset     = -60
+ENT.MuzzleForwardOffset  = DEFAULT_MUZZLE_FWD
+ENT.MuzzleSideOffset     = DEFAULT_MUZZLE_SIDE
 ENT.Plane_Ambient_SoundPath = "sounds/ac/ac-130B.wav"
-
--- ============================================================
--- HP TUNING
--- ============================================================
 
 ENT.MaxHP = 8000
 
@@ -110,7 +130,33 @@ function ENT:Initialize()
     self.OrbitRadius  = self:GetVar("OrbitRadius", 3000)
     self.SkyHeightAdd = self:GetVar("SkyHeightAdd", 6000)
 
-    self.MaxHP = self.MaxHP or ENT.MaxHP or 8000
+    -- Ensure all tunable fields have values on the instance
+    self.WeaponWindow        = self.WeaponWindow        or DEFAULT_WEAPON_WINDOW
+    self.GAU_FirstBurstTime  = self.GAU_FirstBurstTime  or DEFAULT_GAU_FIRST_BURST
+    self.GAU_SecondBurstTime = self.GAU_SecondBurstTime or DEFAULT_GAU_SECOND_BURST
+    self.GAU_BurstCount      = self.GAU_BurstCount      or DEFAULT_GAU_BURST_COUNT
+    self.GAU_BurstDelay      = self.GAU_BurstDelay      or DEFAULT_GAU_BURST_DELAY
+    self.GAU_SweepHalfLength = self.GAU_SweepHalfLength or DEFAULT_GAU_SWEEP_HALF
+    self.GAU_JitterAmount    = self.GAU_JitterAmount    or DEFAULT_GAU_JITTER
+    self.GAU_SpraySoundDelay = self.GAU_SpraySoundDelay or DEFAULT_GAU_SPRAY_SOUND_DLY
+    self.GAU_TargetOffsetMin = self.GAU_TargetOffsetMin or DEFAULT_GAU_TARGET_OFF_MIN
+    self.GAU_TargetOffsetMax = self.GAU_TargetOffsetMax or DEFAULT_GAU_TARGET_OFF_MAX
+    self.GAU_HEI_Interval    = self.GAU_HEI_Interval    or DEFAULT_GAU_HEI_INTERVAL
+    self.GAU_BulletDamage    = self.GAU_BulletDamage    or DEFAULT_GAU_BULLET_DAMAGE
+    self.GUN40_Delay         = self.GUN40_Delay         or DEFAULT_GUN40_DELAY
+    self.GUN105_Delay        = self.GUN105_Delay        or DEFAULT_GUN105_DELAY
+    self.GUN40_ShellVelocity = self.GUN40_ShellVelocity or DEFAULT_GUN40_VEL
+    self.GUN105_ShellVelocity= self.GUN105_ShellVelocity or DEFAULT_GUN105_VEL
+    self.GUN40_Damage        = self.GUN40_Damage        or DEFAULT_GUN40_DMG
+    self.GUN105_Damage       = self.GUN105_Damage       or DEFAULT_GUN105_DMG
+    self.GUN40_TNT           = self.GUN40_TNT           or DEFAULT_GUN40_TNT
+    self.GUN105_TNT          = self.GUN105_TNT          or DEFAULT_GUN105_TNT
+    self.GUN40_Scatter       = self.GUN40_Scatter       or DEFAULT_GUN40_SCATTER
+    self.GUN105_Scatter      = self.GUN105_Scatter      or DEFAULT_GUN105_SCATTER
+    self.GAU_Spray_Delay     = self.GAU_Spray_Delay     or DEFAULT_GAU_SPRAY_DELAY
+    self.MuzzleForwardOffset = self.MuzzleForwardOffset or DEFAULT_MUZZLE_FWD
+    self.MuzzleSideOffset    = self.MuzzleSideOffset    or DEFAULT_MUZZLE_SIDE
+    self.MaxHP               = self.MaxHP               or 8000
 
     if self.CallDir:LengthSqr() <= 1 then
         self.CallDir = Vector(1, 0, 0)
@@ -395,7 +441,7 @@ end
 -- ============================================================
 
 function ENT:HandleWeaponWindow(ct)
-    if not self.CurrentWeapon or ct >= self.WeaponWindowEnd then
+    if not self.CurrentWeapon or ct >= (self.WeaponWindowEnd or 0) then
         self:PickNewWeapon(ct)
     end
 
@@ -424,20 +470,26 @@ function ENT:PickNewWeapon(ct)
         self.CurrentWeapon = "25mm_spray"
     end
 
-    self.WeaponWindowEnd = ct + self.WeaponWindow
+    local window = self.WeaponWindow or DEFAULT_WEAPON_WINDOW
+    self.WeaponWindowEnd = ct + window
     self:Debug("Picked weapon: " .. self.CurrentWeapon)
 
-    if self.MuzzleIndexGlobal < 1 or self.MuzzleIndexGlobal > #self.MuzzlePoints then
+    if not self.MuzzlePoints then self.MuzzlePoints = ENT.MuzzlePoints end
+    local muzzleCount = #self.MuzzlePoints
+
+    if not self.MuzzleIndexGlobal or self.MuzzleIndexGlobal < 1 or self.MuzzleIndexGlobal > muzzleCount then
         self.MuzzleIndexGlobal = 1
     end
     self.MuzzleIndexWeapon = self.MuzzleIndexGlobal
     self.MuzzleIndexGlobal = self.MuzzleIndexGlobal + 1
-    if self.MuzzleIndexGlobal > #self.MuzzlePoints then
+    if self.MuzzleIndexGlobal > muzzleCount then
         self.MuzzleIndexGlobal = 1
     end
 
     if self.CurrentWeapon == "25mm" then
-        self.GAU_BurstTimes   = { ct + self.GAU_FirstBurstTime, ct + self.GAU_SecondBurstTime }
+        local t1 = self.GAU_FirstBurstTime  or DEFAULT_GAU_FIRST_BURST
+        local t2 = self.GAU_SecondBurstTime or DEFAULT_GAU_SECOND_BURST
+        self.GAU_BurstTimes   = { ct + t1, ct + t2 }
         self.GAU_BurstsFired  = 0
         self.GAU_ActiveBursts = {}
 
@@ -455,8 +507,9 @@ function ENT:PickNewWeapon(ct)
         local sweepDir  = Vector(math.Rand(-1, 1), math.Rand(-1, 1), 0)
         if sweepDir:LengthSqr() < 0.01 then sweepDir = Vector(1, 0, 0) end
         sweepDir:Normalize()
-        self.GAU_SweepStartPos  = targetPos - sweepDir * self.GAU_SweepHalfLength
-        self.GAU_SweepEndPos    = targetPos + sweepDir * self.GAU_SweepHalfLength
+        local half = self.GAU_SweepHalfLength or DEFAULT_GAU_SWEEP_HALF
+        self.GAU_SweepStartPos  = targetPos - sweepDir * half
+        self.GAU_SweepEndPos    = targetPos + sweepDir * half
         self.GAU_SweepMuzzlePos = self:GetMuzzlePos()
     end
 end
@@ -472,7 +525,7 @@ end
 function ENT:PlaySpraySoundAndFlash(ct)
     NetSound(table.Random(GAU_BRRT_SOUNDS), self.CenterPos, 110, math.random(96, 104), 1.0)
     self:SpawnWeaponMuzzleFX("cball_explode", 1)
-    self.NextSpraySoundTime = ct + self.GAU_SpraySoundDelay
+    self.NextSpraySoundTime = ct + (self.GAU_SpraySoundDelay or DEFAULT_GAU_SPRAY_SOUND_DLY)
 end
 
 -- ============================================================
@@ -507,7 +560,10 @@ function ENT:GetTargetGroundPos()
         basePos = tr.HitPos
     end
 
-    local offsetDist = math.Rand(self.GAU_TargetOffsetMin, self.GAU_TargetOffsetMax)
+    local offsetDist = math.Rand(
+        self.GAU_TargetOffsetMin or DEFAULT_GAU_TARGET_OFF_MIN,
+        self.GAU_TargetOffsetMax or DEFAULT_GAU_TARGET_OFF_MAX
+    )
     local offsetDir  = Vector(math.Rand(-1, 1), math.Rand(-1, 1), 0)
     if offsetDir:LengthSqr() < 0.01 then offsetDir = Vector(1, 0, 0) end
     offsetDir:Normalize()
@@ -520,40 +576,17 @@ function ENT:GetMuzzlePos()
     local ang     = self:GetAngles()
     local forward = ang:Forward()
     local right   = ang:Right()
-    local muzzle  = pos + forward * self.MuzzleForwardOffset + right * self.MuzzleSideOffset
+    local fwd     = self.MuzzleForwardOffset or DEFAULT_MUZZLE_FWD
+    local side    = self.MuzzleSideOffset    or DEFAULT_MUZZLE_SIDE
+    local muzzle  = pos + forward * fwd + right * side
     muzzle.z      = self.sky
     return muzzle
 end
 
-function ENT:GetConeAimedDirection(baseConeDeg)
-    local muzzlePos = self:GetMuzzlePos()
-    local target    = self:GetPrimaryTarget()
-    local targetPos
-
-    if IsValid(target) then
-        targetPos = target:EyePos()
-    else
-        targetPos = Vector(self.CenterPos.x, self.CenterPos.y, self.CenterPos.z + 8)
-    end
-
-    local aimDir = targetPos - muzzlePos
-    if aimDir:LengthSqr() <= 1 then
-        aimDir = self:GetAngles():Forward()
-    end
-    aimDir:Normalize()
-
-    local cone = math.rad(baseConeDeg)
-    local ang  = aimDir:Angle()
-    ang:RotateAroundAxis(ang:Up(),    math.Rand(-cone, cone))
-    ang:RotateAroundAxis(ang:Right(), math.Rand(-cone * 0.5, cone * 0.5))
-
-    local dir = ang:Forward()
-    dir:Normalize()
-    return dir, muzzlePos
-end
-
 function ENT:GetWeaponMuzzleWorldPos()
-    if self.MuzzleIndexWeapon < 1 or self.MuzzleIndexWeapon > #self.MuzzlePoints then
+    if not self.MuzzlePoints then self.MuzzlePoints = ENT.MuzzlePoints end
+    local muzzleCount = #self.MuzzlePoints
+    if not self.MuzzleIndexWeapon or self.MuzzleIndexWeapon < 1 or self.MuzzleIndexWeapon > muzzleCount then
         self.MuzzleIndexWeapon = 1
     end
     return self:LocalToWorld(self.MuzzlePoints[self.MuzzleIndexWeapon])
@@ -602,7 +635,6 @@ function ENT:SpawnGAUImpactFX(impactPos)
         net.WriteUInt(GAU_CAL_ID, 4)
     net.Broadcast()
 
-    -- Use NetSound so clients play this at the impact position regardless of distance
     NetSound(table.Random(GAU_IMPACT_SOUNDS), impactPos, 110, math.random(95, 105), 1.0)
 end
 
@@ -653,14 +685,15 @@ function ENT:FireGAUBulletAt(impactPos, bulletIndex)
         if ent:IsPlayer() or ent:IsNPC() or ent:GetClass() == "nextbot" then
             local dmginfo = DamageInfo()
             dmginfo:SetAttacker(self)
-            dmginfo:SetDamage(self.GAU_BulletDamage)
+            dmginfo:SetDamage(self.GAU_BulletDamage or DEFAULT_GAU_BULLET_DAMAGE)
             dmginfo:SetDamagePosition(hitPos)
             dmginfo:SetDamageType(DMG_BULLET)
             ent:TakeDamageInfo(dmginfo)
         end
     end
 
-    if bulletIndex % self.GAU_HEI_Interval == 0 then
+    local hei = self.GAU_HEI_Interval or DEFAULT_GAU_HEI_INTERVAL
+    if bulletIndex % hei == 0 then
         self:SpawnGAUHEIRound(hitPos)
     end
 end
@@ -673,10 +706,10 @@ function ENT:Update25mmBurstsSchedule(ct)
     if not self.GAU_BurstTimes then return end
 
     for i, t in ipairs(self.GAU_BurstTimes) do
-        if t ~= false and ct >= t and ct < self.WeaponWindowEnd then
+        if t ~= false and ct >= t and ct < (self.WeaponWindowEnd or 0) then
             self:StartGAUBurst()
             self.GAU_BurstTimes[i] = false
-            self.GAU_BurstsFired   = self.GAU_BurstsFired + 1
+            self.GAU_BurstsFired   = (self.GAU_BurstsFired or 0) + 1
         end
     end
 end
@@ -689,10 +722,12 @@ function ENT:StartGAUBurst()
     if sweepDir:LengthSqr() < 0.01 then sweepDir = Vector(1, 0, 0) end
     sweepDir:Normalize()
 
-    self.GAU_SweepStartPos  = targetPos - sweepDir * self.GAU_SweepHalfLength
-    self.GAU_SweepEndPos    = targetPos + sweepDir * self.GAU_SweepHalfLength
+    local half = self.GAU_SweepHalfLength or DEFAULT_GAU_SWEEP_HALF
+    self.GAU_SweepStartPos  = targetPos - sweepDir * half
+    self.GAU_SweepEndPos    = targetPos + sweepDir * half
     self.GAU_SweepMuzzlePos = muzzlePos
 
+    if not self.GAU_ActiveBursts then self.GAU_ActiveBursts = {} end
     table.insert(self.GAU_ActiveBursts, { bulletsFired = 0, nextTime = CurTime() })
 
     self:SpawnWeaponMuzzleFX("cball_explode", 1)
@@ -702,15 +737,18 @@ end
 function ENT:UpdateActiveGAUBursts(ct)
     if not self.GAU_ActiveBursts then return end
 
+    local burstCount = self.GAU_BurstCount or DEFAULT_GAU_BURST_COUNT
+    local burstDelay = self.GAU_BurstDelay or DEFAULT_GAU_BURST_DELAY
+
     for idx = #self.GAU_ActiveBursts, 1, -1 do
         local burst = self.GAU_ActiveBursts[idx]
         if not burst then
             table.remove(self.GAU_ActiveBursts, idx)
         elseif ct >= burst.nextTime then
             burst.bulletsFired = burst.bulletsFired + 1
-            burst.nextTime     = ct + self.GAU_BurstDelay
+            burst.nextTime     = ct + burstDelay
             self:FireSingleGAUBullet(burst.bulletsFired)
-            if burst.bulletsFired >= self.GAU_BurstCount then
+            if burst.bulletsFired >= burstCount then
                 table.remove(self.GAU_ActiveBursts, idx)
             end
         end
@@ -720,11 +758,14 @@ end
 function ENT:FireSingleGAUBullet(bulletIndex)
     if not self.GAU_SweepStartPos then return end
 
-    local fraction   = math.Clamp((bulletIndex - 1) / (self.GAU_BurstCount - 1), 0, 1)
+    local burstCount = self.GAU_BurstCount or DEFAULT_GAU_BURST_COUNT
+    local jitterAmt  = self.GAU_JitterAmount or DEFAULT_GAU_JITTER
+
+    local fraction   = math.Clamp((bulletIndex - 1) / (burstCount - 1), 0, 1)
     local baseImpact = LerpVector(fraction, self.GAU_SweepStartPos, self.GAU_SweepEndPos)
     local jitter     = Vector(
-        math.Rand(-self.GAU_JitterAmount, self.GAU_JitterAmount),
-        math.Rand(-self.GAU_JitterAmount, self.GAU_JitterAmount),
+        math.Rand(-jitterAmt, jitterAmt),
+        math.Rand(-jitterAmt, jitterAmt),
         0
     )
     self:FireGAUBulletAt(baseImpact + jitter, bulletIndex)
@@ -735,24 +776,26 @@ end
 -- ============================================================
 
 function ENT:Update25mmSpray(ct)
-    if ct >= self.WeaponWindowEnd then
+    if ct >= (self.WeaponWindowEnd or 0) then
         self:StopSprayLoop()
         return
     end
 
-    if self.NextSpraySoundTime > 0 and ct >= self.NextSpraySoundTime then
+    if (self.NextSpraySoundTime or 0) > 0 and ct >= self.NextSpraySoundTime then
         self:PlaySpraySoundAndFlash(ct)
     end
 
-    if ct < self.NextShotTimeSpray then return end
+    if ct < (self.NextShotTimeSpray or 0) then return end
 
-    self.NextShotTimeSpray = ct + self.GAU_Spray_Delay
-    self.SprayBulletCount  = self.SprayBulletCount + 1
+    local sprayDelay = self.GAU_Spray_Delay or DEFAULT_GAU_SPRAY_DELAY
+    self.NextShotTimeSpray = ct + sprayDelay
+    self.SprayBulletCount  = (self.SprayBulletCount or 0) + 1
 
+    local jitterAmt = (self.GAU_JitterAmount or DEFAULT_GAU_JITTER) * 2
     local targetPos = self:GetTargetGroundPos()
     local finalImpact = targetPos + Vector(
-        math.Rand(-self.GAU_JitterAmount * 2, self.GAU_JitterAmount * 2),
-        math.Rand(-self.GAU_JitterAmount * 2, self.GAU_JitterAmount * 2),
+        math.Rand(-jitterAmt, jitterAmt),
+        math.Rand(-jitterAmt, jitterAmt),
         0
     )
 
@@ -765,12 +808,13 @@ end
 
 function ENT:Update40mm(ct)
     if not self.NextShotTime40 or ct < self.NextShotTime40 then return end
-    self.NextShotTime40 = ct + self.GUN40_Delay
+    self.NextShotTime40 = ct + (self.GUN40_Delay or DEFAULT_GUN40_DELAY)
 
     local muzzlePos = self:GetMuzzlePos()
+    local scatter   = self.GUN40_Scatter or DEFAULT_GUN40_SCATTER
     local aimTarget = self:GetTargetGroundPos() + Vector(
-        math.Rand(-self.GUN40_Scatter, self.GUN40_Scatter),
-        math.Rand(-self.GUN40_Scatter, self.GUN40_Scatter),
+        math.Rand(-scatter, scatter),
+        math.Rand(-scatter, scatter),
         0
     )
 
@@ -782,7 +826,7 @@ function ENT:Update40mm(ct)
         local shell = gred.CreateShell(
             muzzlePos, dir:Angle(), self, { self },
             40, "HE", 800, 0.9, "yellow",
-            self.GUN40_Damage, nil, self.GUN40_TNT
+            self.GUN40_Damage or DEFAULT_GUN40_DMG, nil, self.GUN40_TNT or DEFAULT_GUN40_TNT
         )
         if IsValid(shell) then
             if shell.Arm then shell:Arm() end
@@ -792,7 +836,7 @@ function ENT:Update40mm(ct)
             local phys = shell:GetPhysicsObject()
             if IsValid(phys) then
                 phys:EnableGravity(true)
-                phys:SetVelocity(dir * self.GUN40_ShellVelocity)
+                phys:SetVelocity(dir * (self.GUN40_ShellVelocity or DEFAULT_GUN40_VEL))
             end
         end
     else
@@ -842,12 +886,13 @@ end
 
 function ENT:Update105mm(ct)
     if not self.NextShotTime105 or ct < self.NextShotTime105 then return end
-    self.NextShotTime105 = ct + self.GUN105_Delay
+    self.NextShotTime105 = ct + (self.GUN105_Delay or DEFAULT_GUN105_DELAY)
 
     local muzzlePos = self:GetMuzzlePos()
+    local scatter   = self.GUN105_Scatter or DEFAULT_GUN105_SCATTER
     local aimTarget = self:GetTargetGroundPos() + Vector(
-        math.Rand(-self.GUN105_Scatter, self.GUN105_Scatter),
-        math.Rand(-self.GUN105_Scatter, self.GUN105_Scatter),
+        math.Rand(-scatter, scatter),
+        math.Rand(-scatter, scatter),
         0
     )
 
@@ -859,7 +904,7 @@ function ENT:Update105mm(ct)
         local shell = gred.CreateShell(
             muzzlePos, dir:Angle(), self, { self },
             105, "HE", 600, 15, "white",
-            self.GUN105_Damage, nil, self.GUN105_TNT
+            self.GUN105_Damage or DEFAULT_GUN105_DMG, nil, self.GUN105_TNT or DEFAULT_GUN105_TNT
         )
         if IsValid(shell) then
             if shell.Arm then shell:Arm() end
@@ -875,7 +920,7 @@ function ENT:Update105mm(ct)
             local phys = shell:GetPhysicsObject()
             if IsValid(phys) then
                 phys:EnableGravity(true)
-                phys:SetVelocity(dir * self.GUN105_ShellVelocity)
+                phys:SetVelocity(dir * (self.GUN105_ShellVelocity or DEFAULT_GUN105_VEL))
             end
 
             local plane = self
