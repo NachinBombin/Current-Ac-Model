@@ -50,16 +50,16 @@ ENT.GAU_DamageMul       = 0.5
 ENT.GAU_RadiusMul       = 0.05
 ENT.GAU_SweepHalfLength = 600
 ENT.GAU_JitterAmount    = 200
-ENT.GAU_SpraySoundDelay = 2.4
+ENT.GAU_SpraySoundDelay = 1.6
 
 ENT.GAU_TargetOffsetMin = 300
 ENT.GAU_TargetOffsetMax = 900
 
-ENT.GAU_HEI_Interval    = 20
+ENT.GAU_HEI_Interval    = 900
 ENT.GAU_BulletDamage    = 40
 -- Blast radius for each GAU round landing near a target.
 -- Small enough that you must be close to the impact to take damage.
-ENT.GAU_BlastRadius     = 80
+ENT.GAU_BlastRadius     = 100
 
 ENT.GUN40_Delay          = 0.5
 ENT.GUN105_Delay         = 6
