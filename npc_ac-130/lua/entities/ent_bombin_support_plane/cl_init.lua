@@ -33,45 +33,33 @@ end)
 -- Tier 2 = <= 50% HP (2 fire + 2 smoke)
 -- Tier 3 = <= 25% HP (3 fire + 3 smoke)
 
--- Particle systems to use per tier (all from HL2 base pcf, always available)
 local FIRE_SYSTEMS  = { "fire_medium_02", "fire_large_02", "fire_large_02" }
 local SMOKE_SYSTEMS = { "smoke_stack",    "smoke_stack",   "smoke_exhaust"  }
 
--- How frequently to fire burst explosions per tier (seconds)
 local TIER_BURST_DELAY = { [1] = 4.0, [2] = 2.0, [3] = 0.8 }
--- How many simultaneous burst pops per interval
 local TIER_BURST_COUNT = { [1] = 1,   [2] = 2,   [3] = 4   }
 
--- Local-space positions across the airframe (fuselage, wings, tail)
--- The CreateParticleEffect attachment type PATTACH_ABSORIGIN_FOLLOW uses
--- the entity origin — we move the control point instead via SetControlPoint.
--- For simplicity all fire points use PATTACH_ABSORIGIN_FOLLOW so they
--- track the entity exactly; visual spread comes from control point offsets
--- set after creation.
 local FIRE_OFFSETS = {
-    Vector(  0,    0,  20),   -- centre top
-    Vector( 90,    0,   0),   -- left wing root
-    Vector(-90,    0,   0),   -- right wing root
+    Vector(  0,    0,  20),
+    Vector( 90,    0,   0),
+    Vector(-90,    0,   0),
 }
 local SMOKE_OFFSETS = {
-    Vector(  0, -130,  30),   -- tail
-    Vector( 60,  -80,  10),   -- left rear
-    Vector(-60,  -80,  10),   -- right rear
+    Vector(  0, -130,  30),
+    Vector( 60,  -80,  10),
+    Vector(-60,  -80,  10),
 }
 
--- Per-entity client state table
--- [entIndex] = { tier, particles = {CNewParticleEffect,...}, nextBurst, ... }
 local PlaneStates = {}
 
 -- ============================================================
--- BURST EXPLOSION FX (one-shot, world-space, no texture needed)
+-- BURST EXPLOSION FX
 -- ============================================================
 local function SpawnBurstFX(ent, count)
     if not IsValid(ent) then return end
     local pos = ent:GetPos()
     local ang = ent:GetAngles()
     for _ = 1, count do
-        -- random offset in local space, converted to world
         local lOff = Vector(
             math.Rand(-120, 120),
             math.Rand(-150,  80),
@@ -104,8 +92,7 @@ local function StopParticles(state)
     for _, p in ipairs(state.particles) do
         if IsValid(p) then
             p:StopEmission()
-            p:SetDormant(true)
-            p:Release()
+            p:Destroy()
         end
     end
     state.particles = {}
@@ -117,24 +104,17 @@ local function ApplyFlameParticles(ent, state, tier)
 
     if not IsValid(ent) or tier == 0 then return end
 
-    -- Number of fire/smoke emitters scales with tier
-    local firePts  = tier           -- 1 / 2 / 3
-    local smokePts = tier           -- 1 / 2 / 3
-
-    -- Fire particles — attached to entity origin, follow automatically
-    for i = 1, firePts do
+    for i = 1, tier do
         local pName = FIRE_SYSTEMS[i] or FIRE_SYSTEMS[#FIRE_SYSTEMS]
         local p = ent:CreateParticleEffect(pName, PATTACH_ABSORIGIN_FOLLOW, 0)
         if IsValid(p) then
-            -- Offset control point 0 in local space so emitters spread across model
             local off = FIRE_OFFSETS[i] or Vector(0,0,0)
             p:SetControlPoint(0, ent:LocalToWorld(off))
             table.insert(state.particles, p)
         end
     end
 
-    -- Smoke particles
-    for i = 1, smokePts do
+    for i = 1, tier do
         local pName = SMOKE_SYSTEMS[i] or SMOKE_SYSTEMS[#SMOKE_SYSTEMS]
         local p = ent:CreateParticleEffect(pName, PATTACH_ABSORIGIN_FOLLOW, 0)
         if IsValid(p) then
@@ -148,7 +128,7 @@ local function ApplyFlameParticles(ent, state, tier)
 end
 
 -- ============================================================
--- NET: server tells clients which damage tier the plane is at
+-- NET
 -- ============================================================
 net.Receive("bombin_plane_damage_tier", function()
     local entIndex = net.ReadUInt(16)
@@ -170,15 +150,13 @@ net.Receive("bombin_plane_damage_tier", function()
             SpawnBurstFX(ent, TIER_BURST_COUNT[tier] or 1)
         end
     else
-        -- entity not yet valid on client; store pending tier, apply in Think
-        state.tier        = tier
+        state.tier         = tier
         state.pendingApply = true
     end
 end)
 
 -- ============================================================
--- THINK: periodic burst explosions + deferred particle apply
--- + update control points so offsets follow the moving plane
+-- THINK
 -- ============================================================
 hook.Add("Think", "bombin_plane_damage_fx", function()
     local ct = CurTime()
@@ -188,18 +166,16 @@ hook.Add("Think", "bombin_plane_damage_fx", function()
             StopParticles(state)
             PlaneStates[entIndex] = nil
         else
-            -- Deferred first apply (entity wasn't valid when net msg arrived)
             if state.pendingApply then
                 state.pendingApply = false
                 ApplyFlameParticles(ent, state, state.tier)
             end
 
             if state.tier > 0 then
-                -- Re-sync control points every frame so offsets track the plane
                 local pos = ent:GetPos()
                 local ang = ent:GetAngles()
                 local pi  = 1
-                for i = 1, state.tier do  -- fire
+                for i = 1, state.tier do
                     local p = state.particles[pi]
                     if IsValid(p) then
                         local off = FIRE_OFFSETS[i] or Vector(0,0,0)
@@ -207,7 +183,7 @@ hook.Add("Think", "bombin_plane_damage_fx", function()
                     end
                     pi = pi + 1
                 end
-                for i = 1, state.tier do  -- smoke
+                for i = 1, state.tier do
                     local p = state.particles[pi]
                     if IsValid(p) then
                         local off = SMOKE_OFFSETS[i] or Vector(0,0,0)
@@ -216,7 +192,6 @@ hook.Add("Think", "bombin_plane_damage_fx", function()
                     pi = pi + 1
                 end
 
-                -- Periodic burst explosions
                 if ct >= state.nextBurst then
                     SpawnBurstFX(ent, TIER_BURST_COUNT[state.tier] or 1)
                     state.nextBurst = ct + (TIER_BURST_DELAY[state.tier] or 4)
