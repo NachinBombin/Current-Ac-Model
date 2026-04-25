@@ -2,6 +2,9 @@ AddCSLuaFile("cl_init.lua")
 AddCSLuaFile("shared.lua")
 include("shared.lua")
 
+util.AddNetworkString("bombin_plane_sound")
+util.AddNetworkString("gred_net_createimpact")
+
 local function HasGred()
     return gred and gred.CreateBullet and gred.CreateShell
 end
@@ -22,7 +25,6 @@ local PASS_SOUNDS = {
     "killstreak_rewards/ac-130_25mm_fire.wav",
 }
 
--- Vanilla GMod bullet impact sounds - no custom files needed
 local GAU_IMPACT_SOUNDS = {
     "physics/concrete/impact_concrete_bullet1.wav",
     "physics/concrete/impact_concrete_bullet2.wav",
@@ -465,8 +467,6 @@ function ENT:SpawnGAUImpactFX(impactPos)
         net.Broadcast()
     end
 
-    -- util.EmitSound is server-side and automatically networked to nearby clients.
-    -- No custom net messages, no prefix issues.
     util.EmitSound(table.Random(GAU_IMPACT_SOUNDS), impactPos, -1, CHAN_AUTO, 1.0, 80, 0, math.random(95, 105))
 end
 
