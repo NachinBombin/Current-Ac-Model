@@ -33,6 +33,7 @@ local GAU_BRRT_SOUNDS = {
 
 local GAU_CAL_ID = 3
 
+-- Net messages
 util.AddNetworkString("bombin_plane_damage_tier")
 
 function ENT:Debug(msg)
@@ -52,12 +53,12 @@ ENT.GAU_DamageMul       = 0.5
 ENT.GAU_RadiusMul       = 0.05
 ENT.GAU_SweepHalfLength = 600
 ENT.GAU_JitterAmount    = 200
-ENT.GAU_SpraySoundDelay = 2.4
+ENT.GAU_SpraySoundDelay = 1.3
 
 ENT.GAU_TargetOffsetMin = 300
 ENT.GAU_TargetOffsetMax = 900
 
-ENT.GAU_HEI_Interval    = 20
+ENT.GAU_HEI_Interval    = 900
 ENT.GAU_BulletDamage    = 40
 ENT.GAU_BlastRadius     = 80
 
@@ -77,11 +78,18 @@ ENT.GAU_Spray_Delay      = 0.033
 
 ENT.MuzzleForwardOffset  = 250
 ENT.MuzzleSideOffset     = -60
-ENT.Plane_Ambient_SoundPath = "ac/ac-130B.wav"
+ENT.Plane_Ambient_SoundPath = "sounds/ac/ac-130B.wav"
 
 ENT.JASSM_AltOffset = 1500
 
+-- ============================================================
+-- HP TUNING
+-- ============================================================
+
 ENT.MaxHP = 8000
+
+-- HP thresholds at which a new damage tier is unlocked (fraction of MaxHP)
+-- Tier 1 = 75%, Tier 2 = 50%, Tier 3 = 25%
 ENT.DamageTierThresholds = { 0.75, 0.50, 0.25 }
 
 ENT.MuzzlePoints = {
@@ -147,8 +155,6 @@ function ENT:Initialize()
 
     self:SetNWInt("HP",    self.MaxHP)
     self:SetNWInt("MaxHP", self.MaxHP)
-    -- Let cl_init know which sound file to loop
-    self:SetNWString("AmbientSoundPath", self.Plane_Ambient_SoundPath)
 
     local ang = self.CallDir:Angle()
     self:SetAngles(Angle(0, ang.y - 90, 0))
@@ -173,13 +179,17 @@ function ENT:Initialize()
         self.PhysObj:EnableGravity(false)
     end
 
-    -- Server-side idle interior sound (heard only in listen-server host ear — acceptable)
     self.IdleLoop = CreateSound(self, "ac-130_kill_sounds/AC130_idle_inside.mp3")
     if self.IdleLoop then
         self.IdleLoop:SetSoundLevel(60)
         self.IdleLoop:Play()
     end
-    -- NOTE: Plane_Ambient_SoundPath loop is now handled client-side in cl_init.lua
+
+    self.PlaneAmbientLoop = CreateSound(self, self.Plane_Ambient_SoundPath)
+    if self.PlaneAmbientLoop then
+        self.PlaneAmbientLoop:SetSoundLevel(80)
+        self.PlaneAmbientLoop:Play()
+    end
 
     self.NextSpraySoundTime = 0
 
@@ -206,7 +216,7 @@ function ENT:Initialize()
     self.MuzzleIndexWeapon  = 1
 
     self.IsDestroyed  = false
-    self.DamageTier   = 0
+    self.DamageTier   = 0       -- current visual damage tier (0-3)
     self.JASSM_DeployCount = 0
 
     if not HasGred() then
@@ -228,9 +238,14 @@ end
 function ENT:CheckDamageTier(hp)
     local fraction = hp / (self.MaxHP or 8000)
     local newTier  = 0
+
+    -- Find the highest tier whose threshold has been crossed
     for i, thresh in ipairs(self.DamageTierThresholds or ENT.DamageTierThresholds) do
-        if fraction <= thresh then newTier = i end
+        if fraction <= thresh then
+            newTier = i
+        end
     end
+
     if newTier ~= self.DamageTier then
         self.DamageTier = newTier
         self:BroadcastDamageTier(newTier)
@@ -260,7 +275,10 @@ function ENT:DestroyPlane()
     self.IsDestroyed = true
 
     if self.IdleLoop then self.IdleLoop:Stop() end
+    if self.PlaneAmbientLoop then self.PlaneAmbientLoop:Stop() end
     self:StopSprayLoop()
+
+    -- Tell clients to clear damage FX
     self:BroadcastDamageTier(0)
 
     local pos = self.LastPos or self:GetPos()
@@ -457,10 +475,13 @@ function ENT:PickNewWeapon(ct)
         self.GAU_BurstTimes   = { ct + self.GAU_FirstBurstTime, ct + self.GAU_SecondBurstTime }
         self.GAU_BurstsFired  = 0
         self.GAU_ActiveBursts = {}
+
     elseif self.CurrentWeapon == "40mm" then
         self.NextShotTime40 = ct
+
     elseif self.CurrentWeapon == "105mm" then
         self.NextShotTime105 = ct + 0.5
+
     elseif self.CurrentWeapon == "25mm_spray" then
         self.NextShotTimeSpray  = ct
         self.NextSpraySoundTime = ct
@@ -472,13 +493,14 @@ function ENT:PickNewWeapon(ct)
         self.GAU_SweepStartPos  = targetPos - sweepDir * self.GAU_SweepHalfLength
         self.GAU_SweepEndPos    = targetPos + sweepDir * self.GAU_SweepHalfLength
         self.GAU_SweepMuzzlePos = self:GetMuzzlePos()
+
     elseif self.CurrentWeapon == "jassm" then
         self.JASSM_Fired = false
     end
 end
 
 -- ============================================================
--- SPRAY SOUND / FLASH
+-- SPRAY SOUND / FLASH WINDOW
 -- ============================================================
 
 function ENT:StartSprayLoop(soundPath)
@@ -664,6 +686,7 @@ function ENT:FireGAUBulletAt(impactPos, bulletIndex)
     local groundPos = tr.HitPos
 
     self:SpawnGAUImpactFX(groundPos)
+
     util.BlastDamage(self, self, groundPos + Vector(0, 0, 36), self.GAU_BlastRadius, self.GAU_BulletDamage)
 
     if bulletIndex % self.GAU_HEI_Interval == 0 then
@@ -677,6 +700,7 @@ end
 
 function ENT:Update25mmBurstsSchedule(ct)
     if not self.GAU_BurstTimes then return end
+
     for i, t in ipairs(self.GAU_BurstTimes) do
         if t ~= false and ct >= t and ct < self.WeaponWindowEnd then
             self:StartGAUBurst()
@@ -706,6 +730,7 @@ end
 
 function ENT:UpdateActiveGAUBursts(ct)
     if not self.GAU_ActiveBursts then return end
+
     for idx = #self.GAU_ActiveBursts, 1, -1 do
         local burst = self.GAU_ActiveBursts[idx]
         if not burst then
@@ -723,6 +748,7 @@ end
 
 function ENT:FireSingleGAUBullet(bulletIndex)
     if not self.GAU_SweepStartPos then return end
+
     local fraction   = math.Clamp((bulletIndex - 1) / (self.GAU_BurstCount - 1), 0, 1)
     local baseImpact = LerpVector(fraction, self.GAU_SweepStartPos, self.GAU_SweepEndPos)
     local jitter     = Vector(
@@ -758,6 +784,7 @@ function ENT:Update25mmSpray(ct)
         math.Rand(-self.GAU_JitterAmount * 2, self.GAU_JitterAmount * 2),
         0
     )
+
     self:FireGAUBulletAt(finalImpact, self.SprayBulletCount)
 end
 
@@ -881,15 +908,21 @@ function ENT:Update105mm(ct)
             end
 
             local plane = self
+
             local oldExplode = shell.OnExplode
             shell.OnExplode  = function(s, pos, normal)
-                if simfphys and not simfphys.IsCar then simfphys.IsCar = function() return false end end
+                if simfphys and not simfphys.IsCar then
+                    simfphys.IsCar = function() return false end
+                end
                 if oldExplode then oldExplode(s, pos, normal) end
                 plane:Spawn105mmEffects(pos or s:GetPos())
             end
+
             local oldImpact = shell.OnImpact
             shell.OnImpact  = function(s, pos, normal)
-                if simfphys and not simfphys.IsCar then simfphys.IsCar = function() return false end end
+                if simfphys and not simfphys.IsCar then
+                    simfphys.IsCar = function() return false end
+                end
                 if oldImpact then oldImpact(s, pos, normal) end
                 plane:Spawn105mmEffects(pos or s:GetPos())
             end
@@ -996,7 +1029,7 @@ end
 
 function ENT:OnRemove()
     if self.IdleLoop then self.IdleLoop:Stop() end
-    -- Ambient loop is cleaned up client-side via EntityRemoved hook
+    if self.PlaneAmbientLoop then self.PlaneAmbientLoop:Stop() end
     if not self.IsDestroyed then
         self:StopSprayLoop()
     end

@@ -1,7 +1,7 @@
 include("shared.lua")
 
 -- ============================================================
--- PRECACHE
+-- PRECACHE — HL2 base .pcf files, always present in GMod
 -- ============================================================
 game.AddParticles("particles/fire_01.pcf")
 game.AddParticles("particles/fire_02.pcf")
@@ -26,43 +26,12 @@ net.Receive("bombin_plane_sound", function()
 end)
 
 -- ============================================================
--- AMBIENT LOOP — client-side so all players hear it
--- ============================================================
-local ClientAmbientLoops = {}
-
-hook.Add("OnEntityCreated", "bombin_plane_ambient_loop", function(ent)
-    timer.Simple(0, function()
-        if not IsValid(ent) then return end
-        if ent:GetClass() ~= "ent_bombin_support_plane" then return end
-        local idx = ent:EntIndex()
-        if ClientAmbientLoops[idx] then return end
-        local path = ent:GetNWString("AmbientSoundPath", "ac/ac-130B.wav")
-        local snd  = CreateSound(ent, path)
-        if snd then
-            snd:SetSoundLevel(80)
-            snd:Play()
-            ClientAmbientLoops[idx] = snd
-        end
-    end)
-end)
-
-hook.Add("EntityRemoved", "bombin_plane_ambient_loop_cleanup", function(ent)
-    if not IsValid(ent) then return end
-    local idx = ent:EntIndex()
-    local snd = ClientAmbientLoops[idx]
-    if snd then
-        snd:Stop()
-        ClientAmbientLoops[idx] = nil
-    end
-end)
-
--- ============================================================
 -- DAMAGE STATE VISUALS
+-- ============================================================
 -- Tier 0 = healthy   (no FX)
 -- Tier 1 = <= 75% HP (1 fire + 1 smoke)
 -- Tier 2 = <= 50% HP (2 fire + 2 smoke)
 -- Tier 3 = <= 25% HP (3 fire + 3 smoke)
--- ============================================================
 
 local FIRE_SYSTEMS  = { "fire_medium_02", "fire_large_02", "fire_large_02" }
 local SMOKE_SYSTEMS = { "smoke_stack",    "smoke_stack",   "smoke_exhaust"  }
