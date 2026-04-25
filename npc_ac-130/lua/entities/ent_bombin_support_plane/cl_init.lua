@@ -46,23 +46,31 @@ end)
 -- ============================================================
 -- DAMAGE STATE VISUALS
 -- Tier 0 = healthy  (no FX)
--- Tier 1 = <=75% HP
--- Tier 2 = <=50% HP
--- Tier 3 = <=25% HP
+-- Tier 1 = <=75% HP : 1x fire + 1x smoke
+-- Tier 2 = <=50% HP : 2x fire + 2x smoke
+-- Tier 3 = <=25% HP : 3x fire + 3x smoke
 --
--- We use ONLY engine-native util.Effect calls here.
--- Particle systems like smoke_stack / smoke_exhaust are TF2-only
--- and cause pink error textures on servers without TF2 mounted.
+-- Particle systems used (all from HL2 Episode 2 base, ship with GMod):
+--   fastFire           → particles/largefire.pcf
+--   smoke_blackbillow  → particles/largefire.pcf
+--   Explosion_2_FireSmoke → particles/explosion.pcf
 -- ============================================================
+
+local FIRE_SYSTEMS  = { "fastFire",          "fastFire",          "fastFire"          }
+local SMOKE_SYSTEMS = { "smoke_blackbillow",  "smoke_blackbillow",  "Explosion_2_FireSmoke" }
 
 local TIER_BURST_DELAY = { [1] = 4.0, [2] = 2.0, [3] = 0.8 }
 local TIER_BURST_COUNT = { [1] = 1,   [2] = 2,   [3] = 4   }
 
--- Local offsets for the repeating smoke/fire puffs
-local DAMAGE_OFFSETS = {
+local FIRE_OFFSETS = {
     Vector(   0,    0,  20 ),
-    Vector(  80,  -60,   0 ),
-    Vector( -80,  -60,   0 ),
+    Vector(  90,    0,   0 ),
+    Vector( -90,    0,   0 ),
+}
+local SMOKE_OFFSETS = {
+    Vector(   0, -130,  30 ),
+    Vector(  60,  -80,  10 ),
+    Vector( -60,  -80,  10 ),
 }
 
 local PlaneStates = {}
@@ -100,36 +108,43 @@ local function SpawnBurstFX(ent, count)
 end
 
 -- ============================================================
--- REPEATING DAMAGE SMOKE/FIRE  (runs every N seconds while damaged)
--- Uses HelicopterMegaBomb for heavy black smoke + fire flash.
--- This effect ships with every GMod install (HL2 base).
+-- PARTICLE MANAGEMENT
 -- ============================================================
-local function SpawnDamagePuff(ent, tier)
-    if not IsValid(ent) then return end
-    local pos = ent:GetPos()
-    local ang = ent:GetAngles()
-
-    -- Number of puff positions scales with tier
-    for i = 1, tier do
-        local off  = DAMAGE_OFFSETS[i] or Vector(0,0,0)
-        local wPos = LocalToWorld(off, Angle(0,0,0), pos, ang)
-
-        -- Black smoke column
-        local ed1 = EffectData()
-        ed1:SetOrigin(wPos)
-        ed1:SetScale(1 + tier * 0.5)
-        ed1:SetMagnitude(1 + tier * 0.5)
-        ed1:SetRadius(80 + tier * 40)
-        util.Effect("HelicopterMegaBomb", ed1)
-
-        -- Small fire flash at same point
-        local ed2 = EffectData()
-        ed2:SetOrigin(wPos)
-        ed2:SetScale(0.6)
-        ed2:SetMagnitude(0.6)
-        ed2:SetRadius(30)
-        util.Effect("Explosion", ed2)
+local function StopParticles(state)
+    if not state.particles then return end
+    for _, p in ipairs(state.particles) do
+        if IsValid(p) then
+            p:StopEmission(true, true)
+        end
     end
+    state.particles = {}
+end
+
+local function ApplyFlameParticles(ent, state, tier)
+    StopParticles(state)
+    state.tier = tier
+
+    if not IsValid(ent) or tier == 0 then return end
+
+    for i = 1, tier do
+        local pName = FIRE_SYSTEMS[i] or FIRE_SYSTEMS[#FIRE_SYSTEMS]
+        local p = ent:CreateParticleEffect(pName, PATTACH_ABSORIGIN_FOLLOW, 0)
+        if IsValid(p) then
+            p:SetControlPoint(0, ent:LocalToWorld(FIRE_OFFSETS[i] or Vector(0,0,0)))
+            table.insert(state.particles, p)
+        end
+    end
+
+    for i = 1, tier do
+        local pName = SMOKE_SYSTEMS[i] or SMOKE_SYSTEMS[#SMOKE_SYSTEMS]
+        local p = ent:CreateParticleEffect(pName, PATTACH_ABSORIGIN_FOLLOW, 0)
+        if IsValid(p) then
+            p:SetControlPoint(0, ent:LocalToWorld(SMOKE_OFFSETS[i] or Vector(0,0,0)))
+            table.insert(state.particles, p)
+        end
+    end
+
+    state.nextBurst = CurTime() + (TIER_BURST_DELAY[tier] or 4)
 end
 
 -- ============================================================
@@ -142,32 +157,63 @@ net.Receive("bombin_plane_damage_tier", function()
 
     local state = PlaneStates[entIndex]
     if not state then
-        state = { tier = 0, nextPuff = 0 }
+        state = { tier = 0, particles = {}, nextBurst = 0 }
         PlaneStates[entIndex] = state
     end
 
     if state.tier == tier then return end
-    state.tier    = tier
-    state.nextPuff = CurTime()
 
-    -- Immediate burst on tier transition
-    if tier > 0 and IsValid(ent) then
-        SpawnBurstFX(ent, TIER_BURST_COUNT[tier] or 1)
+    if IsValid(ent) then
+        ApplyFlameParticles(ent, state, tier)
+        if tier > 0 then
+            SpawnBurstFX(ent, TIER_BURST_COUNT[tier] or 1)
+        end
+    else
+        state.tier         = tier
+        state.pendingApply = true
     end
 end)
 
 -- ============================================================
--- THINK — drive the repeating puff timer
+-- THINK — update control points + burst timer
 -- ============================================================
 hook.Add("Think", "bombin_plane_damage_fx", function()
     local ct = CurTime()
     for entIndex, state in pairs(PlaneStates) do
         local ent = Entity(entIndex)
         if not IsValid(ent) then
+            StopParticles(state)
             PlaneStates[entIndex] = nil
-        elseif state.tier > 0 and ct >= state.nextPuff then
-            SpawnDamagePuff(ent, state.tier)
-            state.nextPuff = ct + (TIER_BURST_DELAY[state.tier] or 4)
+        else
+            if state.pendingApply then
+                state.pendingApply = false
+                ApplyFlameParticles(ent, state, state.tier)
+            end
+
+            if state.tier > 0 then
+                local pos = ent:GetPos()
+                local ang = ent:GetAngles()
+                local pi  = 1
+                for i = 1, state.tier do
+                    local p = state.particles[pi]
+                    if IsValid(p) then
+                        p:SetControlPoint(0, LocalToWorld(FIRE_OFFSETS[i] or Vector(0,0,0), Angle(0,0,0), pos, ang))
+                    end
+                    pi = pi + 1
+                end
+                for i = 1, state.tier do
+                    local p = state.particles[pi]
+                    if IsValid(p) then
+                        p:SetControlPoint(0, LocalToWorld(SMOKE_OFFSETS[i] or Vector(0,0,0), Angle(0,0,0), pos, ang))
+                    end
+                    pi = pi + 1
+                end
+
+                if ct >= state.nextBurst then
+                    SpawnBurstFX(ent, TIER_BURST_COUNT[state.tier] or 1)
+                    state.nextBurst = ct + (TIER_BURST_DELAY[state.tier] or 4)
+                end
+            end
         end
     end
 end)
