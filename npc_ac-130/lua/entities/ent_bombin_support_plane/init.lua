@@ -33,6 +33,9 @@ local GAU_BRRT_SOUNDS = {
 
 local GAU_CAL_ID = 3
 
+-- Net messages
+util.AddNetworkString("bombin_plane_damage_tier")
+
 function ENT:Debug(msg)
     print("[Bombin Support Plane ENT] " .. msg)
 end
@@ -50,16 +53,14 @@ ENT.GAU_DamageMul       = 0.5
 ENT.GAU_RadiusMul       = 0.05
 ENT.GAU_SweepHalfLength = 600
 ENT.GAU_JitterAmount    = 200
-ENT.GAU_SpraySoundDelay = 1.6
+ENT.GAU_SpraySoundDelay = 2.4
 
 ENT.GAU_TargetOffsetMin = 300
 ENT.GAU_TargetOffsetMax = 900
 
-ENT.GAU_HEI_Interval    = 900
+ENT.GAU_HEI_Interval    = 20
 ENT.GAU_BulletDamage    = 40
--- Blast radius for each GAU round landing near a target.
--- Small enough that you must be close to the impact to take damage.
-ENT.GAU_BlastRadius     = 100
+ENT.GAU_BlastRadius     = 80
 
 ENT.GUN40_Delay          = 0.5
 ENT.GUN105_Delay         = 6
@@ -86,6 +87,10 @@ ENT.JASSM_AltOffset = 1500
 -- ============================================================
 
 ENT.MaxHP = 8000
+
+-- HP thresholds at which a new damage tier is unlocked (fraction of MaxHP)
+-- Tier 1 = 75%, Tier 2 = 50%, Tier 3 = 25%
+ENT.DamageTierThresholds = { 0.75, 0.50, 0.25 }
 
 ENT.MuzzlePoints = {
     Vector(300, -250, 50),
@@ -210,7 +215,8 @@ function ENT:Initialize()
     self.MuzzleIndexGlobal  = 1
     self.MuzzleIndexWeapon  = 1
 
-    self.IsDestroyed = false
+    self.IsDestroyed  = false
+    self.DamageTier   = 0       -- current visual damage tier (0-3)
     self.JASSM_DeployCount = 0
 
     if not HasGred() then
@@ -222,6 +228,31 @@ end
 -- DAMAGE HANDLING
 -- ============================================================
 
+function ENT:BroadcastDamageTier(tier)
+    net.Start("bombin_plane_damage_tier")
+        net.WriteUInt(self:EntIndex(), 16)
+        net.WriteUInt(tier, 2)
+    net.Broadcast()
+end
+
+function ENT:CheckDamageTier(hp)
+    local fraction = hp / (self.MaxHP or 8000)
+    local newTier  = 0
+
+    -- Find the highest tier whose threshold has been crossed
+    for i, thresh in ipairs(self.DamageTierThresholds or ENT.DamageTierThresholds) do
+        if fraction <= thresh then
+            newTier = i
+        end
+    end
+
+    if newTier ~= self.DamageTier then
+        self.DamageTier = newTier
+        self:BroadcastDamageTier(newTier)
+        self:Debug("Damage tier -> " .. tostring(newTier) .. " (HP " .. tostring(hp) .. ")")
+    end
+end
+
 function ENT:OnTakeDamage(dmginfo)
     if self.IsDestroyed then return end
     if dmginfo:IsDamageType(DMG_CRUSH) then return end
@@ -231,6 +262,7 @@ function ENT:OnTakeDamage(dmginfo)
     self:SetNWInt("HP", hp)
 
     self:Debug("Hit! HP remaining: " .. tostring(hp))
+    self:CheckDamageTier(hp)
 
     if hp <= 0 then
         self:Debug("Shot down!")
@@ -245,6 +277,9 @@ function ENT:DestroyPlane()
     if self.IdleLoop then self.IdleLoop:Stop() end
     if self.PlaneAmbientLoop then self.PlaneAmbientLoop:Stop() end
     self:StopSprayLoop()
+
+    -- Tell clients to clear damage FX
+    self:BroadcastDamageTier(0)
 
     local pos = self.LastPos or self:GetPos()
 
@@ -640,7 +675,6 @@ end
 -- ============================================================
 
 function ENT:FireGAUBulletAt(impactPos, bulletIndex)
-    -- Find the exact ground point so effects land on the floor, not in the air.
     local traceStart = Vector(impactPos.x, impactPos.y, self.sky + 100)
     local traceEnd   = Vector(impactPos.x, impactPos.y, impactPos.z - 128)
     local tr = util.TraceLine({
@@ -651,12 +685,8 @@ function ENT:FireGAUBulletAt(impactPos, bulletIndex)
     })
     local groundPos = tr.HitPos
 
-    -- Spawn visual effects at the real ground hit
     self:SpawnGAUImpactFX(groundPos)
 
-    -- Damage: sphere centered slightly above ground so standing entities
-    -- are always inside it. The scatter offset (300-900 HU) means this
-    -- only hits targets that are close to where the round actually landed.
     util.BlastDamage(self, self, groundPos + Vector(0, 0, 36), self.GAU_BlastRadius, self.GAU_BulletDamage)
 
     if bulletIndex % self.GAU_HEI_Interval == 0 then
