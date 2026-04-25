@@ -26,6 +26,43 @@ net.Receive("bombin_plane_sound", function()
 end)
 
 -- ============================================================
+-- AMBIENT LOOP — client-side so all players hear it
+-- CreateSound on the server only plays server-side; we create
+-- it here so every connected client gets the 3D looping audio.
+-- ============================================================
+local ClientAmbientLoops = {}   -- [entIndex] = CSoundPatch
+
+hook.Add("OnEntityCreated", "bombin_plane_ambient_loop", function(ent)
+    -- Defer one frame so the entity is fully initialised
+    timer.Simple(0, function()
+        if not IsValid(ent) then return end
+        if ent:GetClass() ~= "ent_bombin_support_plane" then return end
+
+        local idx = ent:EntIndex()
+        if ClientAmbientLoops[idx] then return end  -- already running
+
+        -- Path is stored as a NW string set by the server, or fall back to default
+        local path = ent:GetNWString("AmbientSoundPath", "ac/ac-130B.wav")
+        local snd  = CreateSound(ent, path)
+        if snd then
+            snd:SetSoundLevel(80)
+            snd:Play()
+            ClientAmbientLoops[idx] = snd
+        end
+    end)
+end)
+
+hook.Add("EntityRemoved", "bombin_plane_ambient_loop_cleanup", function(ent)
+    if not IsValid(ent) then return end
+    local idx = ent:EntIndex()
+    local snd = ClientAmbientLoops[idx]
+    if snd then
+        snd:Stop()
+        ClientAmbientLoops[idx] = nil
+    end
+end)
+
+-- ============================================================
 -- DAMAGE STATE VISUALS
 -- ============================================================
 -- Tier 0 = healthy   (no FX)
@@ -91,8 +128,8 @@ local function StopParticles(state)
     if not state.particles then return end
     for _, p in ipairs(state.particles) do
         if IsValid(p) then
-            p:StopEmission()
-            p:Destroy()
+            -- true, true = stop immediately + destroy all live particles now
+            p:StopEmission(true, true)
         end
     end
     state.particles = {}
