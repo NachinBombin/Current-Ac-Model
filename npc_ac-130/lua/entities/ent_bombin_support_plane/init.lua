@@ -57,6 +57,9 @@ ENT.GAU_TargetOffsetMax = 900
 
 ENT.GAU_HEI_Interval    = 20
 ENT.GAU_BulletDamage    = 40
+-- Blast radius for each GAU round landing near a target.
+-- Small enough that you must be close to the impact to take damage.
+ENT.GAU_BlastRadius     = 80
 
 ENT.GUN40_Delay          = 0.5
 ENT.GUN105_Delay         = 6
@@ -637,41 +640,27 @@ end
 -- ============================================================
 
 function ENT:FireGAUBulletAt(impactPos, bulletIndex)
-    -- Trace straight down from sky to the target ground position.
-    -- impactPos is already a ground-level XY coordinate with the
-    -- correct Z from GetTargetGroundPos (player:GetPos() or world hit).
-    -- We start well above it and end well below it so the trace
-    -- passes cleanly through any entity standing at that spot.
+    -- Find the exact ground point so effects land on the floor, not in the air.
     local traceStart = Vector(impactPos.x, impactPos.y, self.sky + 100)
     local traceEnd   = Vector(impactPos.x, impactPos.y, impactPos.z - 128)
-
     local tr = util.TraceLine({
         start  = traceStart,
         endpos = traceEnd,
         filter = self,
         mask   = MASK_SHOT,
     })
+    local groundPos = tr.HitPos
 
-    -- Spawn visual effects at the real hit position
-    self:SpawnGAUImpactFX(tr.HitPos)
+    -- Spawn visual effects at the real ground hit
+    self:SpawnGAUImpactFX(groundPos)
 
-    -- Damage whatever the trace hit.
-    -- We do NOT gate on IsPlayer/IsNPC so SNPCs, vehicles, and props
-    -- are all valid targets. The world brush is never valid so a ground
-    -- hit does no damage, which is the correct behaviour.
-    if tr.Hit and IsValid(tr.Entity) and tr.Entity ~= self then
-        local dmginfo = DamageInfo()
-        dmginfo:SetAttacker(self)
-        dmginfo:SetInflictor(self)
-        dmginfo:SetDamage(self.GAU_BulletDamage)
-        dmginfo:SetDamagePosition(tr.HitPos)
-        dmginfo:SetDamageForce(Vector(0, 0, -1) * self.GAU_BulletDamage * 10)
-        dmginfo:SetDamageType(DMG_BULLET)
-        tr.Entity:TakeDamageInfo(dmginfo)
-    end
+    -- Damage: sphere centered slightly above ground so standing entities
+    -- are always inside it. The scatter offset (300-900 HU) means this
+    -- only hits targets that are close to where the round actually landed.
+    util.BlastDamage(self, self, groundPos + Vector(0, 0, 36), self.GAU_BlastRadius, self.GAU_BulletDamage)
 
     if bulletIndex % self.GAU_HEI_Interval == 0 then
-        self:SpawnGAUHEIRound(tr.HitPos)
+        self:SpawnGAUHEIRound(groundPos)
     end
 end
 
