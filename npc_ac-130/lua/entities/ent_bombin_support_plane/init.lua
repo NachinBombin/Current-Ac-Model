@@ -78,6 +78,9 @@ ENT.MuzzleForwardOffset  = 250
 ENT.MuzzleSideOffset     = -60
 ENT.Plane_Ambient_SoundPath = "sounds/ac/ac-130B.wav"
 
+-- How many HU below the plane the JASSM orbits (avoids collision on stacked passes)
+ENT.JASSM_AltOffset = 1500
+
 -- ============================================================
 -- HP TUNING
 -- ============================================================
@@ -208,6 +211,9 @@ function ENT:Initialize()
     self.MuzzleIndexWeapon  = 1
 
     self.IsDestroyed = false
+
+    -- Track how many JASSMs have been deployed this sortie (used for altitude stagger)
+    self.JASSM_DeployCount = 0
 
     if not HasGred() then
         self:Debug("WARNING: Gred base not found; falling back to rpg_missile.")
@@ -399,21 +405,25 @@ function ENT:HandleWeaponWindow(ct)
         self:Update105mm(ct)
     elseif self.CurrentWeapon == "25mm_spray" then
         self:Update25mmSpray(ct)
+    elseif self.CurrentWeapon == "jassm" then
+        self:UpdateJASSM(ct)
     end
 end
 
 function ENT:PickNewWeapon(ct)
     self:StopSprayLoop()
 
-    local roll = math.random(1, 4)
+    local roll = math.random(1, 5)
     if roll == 1 then
         self.CurrentWeapon = "25mm"
     elseif roll == 2 then
         self.CurrentWeapon = "40mm"
     elseif roll == 3 then
         self.CurrentWeapon = "105mm"
-    else
+    elseif roll == 4 then
         self.CurrentWeapon = "25mm_spray"
+    else
+        self.CurrentWeapon = "jassm"
     end
 
     self.WeaponWindowEnd = ct + self.WeaponWindow
@@ -450,6 +460,9 @@ function ENT:PickNewWeapon(ct)
         self.GAU_SweepStartPos  = targetPos - sweepDir * self.GAU_SweepHalfLength
         self.GAU_SweepEndPos    = targetPos + sweepDir * self.GAU_SweepHalfLength
         self.GAU_SweepMuzzlePos = self:GetMuzzlePos()
+
+    elseif self.CurrentWeapon == "jassm" then
+        self.JASSM_Fired = false
     end
 end
 
@@ -905,6 +918,73 @@ function ENT:Update105mm(ct)
 
     self:SpawnWeaponMuzzleFX("cball_explode", 3)
     sound.Play("killstreak_rewards/ac-130_105mm_fire.wav", self.CenterPos, 110, math.random(96, 104), 1.0)
+end
+
+-- ============================================================
+-- SLOT 5 — AGM-158 JASSM
+-- Spawns from the plane's rear (opposite forward), heading toward
+-- the target center.  Each subsequent deploy steps the orbit altitude
+-- down by JASSM_AltOffset HU so consecutive missiles never stack.
+-- ============================================================
+
+function ENT:UpdateJASSM(ct)
+    -- Fire exactly once per weapon window
+    if self.JASSM_Fired then return end
+    self.JASSM_Fired = true
+
+    if not scripted_ents.GetStored("ent_bombin_jassm") then
+        self:Debug("JASSM: ent_bombin_jassm not registered, skipping")
+        return
+    end
+
+    -- Spawn point: directly behind the plane (opposite forward) at
+    -- OrbitRadius * 1.2 so it clears the model on first frame.
+    local planePos   = self:GetPos()
+    local backward   = -self:GetForward()
+    backward.z       = 0
+    if backward:LengthSqr() < 0.01 then backward = Vector(-1, 0, 0) end
+    backward:Normalize()
+
+    -- Altitude: plane sky minus (deploy count * offset) so each
+    -- successive JASSM loiters in a lower band, avoiding collision.
+    self.JASSM_DeployCount = (self.JASSM_DeployCount or 0) + 1
+    local jassmAlt = self.sky - (self.JASSM_DeployCount * self.JASSM_AltOffset)
+
+    local spawnPos = Vector(
+        planePos.x + backward.x * self.OrbitRadius * 1.2,
+        planePos.y + backward.y * self.OrbitRadius * 1.2,
+        jassmAlt
+    )
+
+    if not util.IsInWorld(spawnPos) then
+        spawnPos = Vector(self.CenterPos.x, self.CenterPos.y, jassmAlt)
+    end
+
+    -- CallDir: plane's current forward projected flat, so the JASSM
+    -- loiters around the same CenterPos the plane is circling.
+    local callDir = self:GetForward()
+    callDir.z     = 0
+    if callDir:LengthSqr() < 0.01 then callDir = Vector(1, 0, 0) end
+    callDir:Normalize()
+
+    local jassm = ents.Create("ent_bombin_jassm")
+    if not IsValid(jassm) then
+        self:Debug("JASSM: ents.Create failed")
+        return
+    end
+
+    jassm:SetPos(spawnPos)
+    jassm:SetAngles(callDir:Angle())
+    jassm:SetVar("CenterPos",   self.CenterPos)
+    jassm:SetVar("CallDir",     callDir)
+    jassm:SetVar("Lifetime",    math.min(self.Lifetime, 35))
+    jassm:SetVar("Speed",       250)
+    jassm:SetVar("OrbitRadius", self.OrbitRadius * 0.75)
+    jassm:SetVar("SkyHeightAdd", math.max(jassmAlt - (self.sky - self.SkyHeightAdd), 800))
+    jassm:Spawn()
+    jassm:Activate()
+
+    self:Debug("JASSM deployed from rear at " .. tostring(spawnPos) .. " alt=" .. tostring(jassmAlt))
 end
 
 -- ============================================================
