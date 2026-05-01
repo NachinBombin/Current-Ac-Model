@@ -11,17 +11,13 @@ local SAMPLE_RATE = 0.025  -- seconds between samples (40fps)
 
 -- ============================================================
 -- EMISSION POINTS  (model-local offsets for AC-130)
--- AC-130 has 4 turboprop engines, all on the wing.
--- Burst FX in cl_init confirms wingspan reaches ±130 units.
--- Tune offsets to match the model mesh if needed.
+-- Two wingtip trails only — one per wing.
+-- X axis is left/right on the model (positive = right, negative = left).
+-- Push these values further out if they still appear too central.
 -- ============================================================
 local TRAIL_POSITIONS = {
-    Vector( -60,  35,  -4 ),   -- inner left engine
-    Vector( -130, 35,  -4 ),   -- outer left engine
-    Vector(  60,  35,  -4 ),   -- inner right engine
-    Vector(  130, 35,  -4 ),   -- outer right engine
-    Vector(   0, -120,  8 ),   -- tail / rear fuselage
-    Vector(   0,   0,  18 ),   -- fuselage top (visible from ground)
+    Vector( -280, 20, -6 ),   -- left wingtip
+    Vector(  280, 20, -6 ),   -- right wingtip
 }
 
 -- ============================================================
