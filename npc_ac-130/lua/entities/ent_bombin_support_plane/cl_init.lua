@@ -1,4 +1,5 @@
 include("shared.lua")
+include("cl_trailsystem.lua")
 
 -- ============================================================
 -- PRECACHE — only one PCF particle, confirmed working
@@ -141,6 +142,9 @@ net.Receive("bombin_plane_damage_tier", function()
     local entIndex = net.ReadUInt(16)
     local tier     = net.ReadUInt(2)
     local ent      = Entity(entIndex)
+
+    -- Trail system tier update
+    PlaneTrailSystem_SetTier( entIndex, tier )
 
     local state = PlaneStates[entIndex]
     if not state then
