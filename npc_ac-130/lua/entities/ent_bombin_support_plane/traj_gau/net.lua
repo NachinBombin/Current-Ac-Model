@@ -1,3 +1,0 @@
--- DEAD DUPLICATE -- this folder is never loaded by GMod.
--- All traj_gau files live in lua/traj_gau/ instead.
--- This file intentionally left as a tombstone.
