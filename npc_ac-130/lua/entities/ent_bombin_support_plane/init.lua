@@ -33,7 +33,6 @@ local GAU_BRRT_SOUNDS = {
 
 local GAU_CAL_ID = 3
 
--- Net messages
 util.AddNetworkString("bombin_plane_damage_tier")
 
 function ENT:Debug(msg)
@@ -58,7 +57,7 @@ ENT.GAU_SpraySoundDelay = 1.3
 ENT.GAU_TargetOffsetMin = 300
 ENT.GAU_TargetOffsetMax = 900
 
-ENT.GAU_HEI_Interval    = 900
+ENT.GAU_HEI_Interval    = 90
 ENT.GAU_BulletDamage    = 40
 ENT.GAU_BlastRadius     = 80
 
@@ -82,12 +81,7 @@ ENT.Plane_Ambient_SoundPath = "sounds/ac/ac-130B.wav"
 
 ENT.JASSM_AltOffset = 1500
 
--- ============================================================
--- HP TUNING
--- ============================================================
-
 ENT.MaxHP = 8000
-
 ENT.DamageTierThresholds = { 0.75, 0.50, 0.25 }
 
 ENT.MuzzlePoints = {
@@ -95,10 +89,6 @@ ENT.MuzzlePoints = {
     Vector(0,   -250, 50),
     Vector(-300,-250, 50),
 }
-
--- ============================================================
--- INITIALIZE
--- ============================================================
 
 function ENT:Initialize()
     self.CenterPos    = self:GetVar("CenterPos", self:GetPos())
@@ -110,38 +100,24 @@ function ENT:Initialize()
 
     self.MaxHP = self.MaxHP or ENT.MaxHP or 8000
 
-    if self.CallDir:LengthSqr() <= 1 then
-        self.CallDir = Vector(1, 0, 0)
-    end
+    if self.CallDir:LengthSqr() <= 1 then self.CallDir = Vector(1, 0, 0) end
     self.CallDir.z = 0
     self.CallDir:Normalize()
 
     local ground = self:FindGround(self.CenterPos)
-    if ground == -1 then
-        self:Debug("FindGround failed")
-        self:Remove()
-        return
-    end
+    if ground == -1 then self:Debug("FindGround failed") self:Remove() return end
 
     self.sky       = ground + self.SkyHeightAdd
     self.DieTime   = CurTime() + self.Lifetime
     self.SpawnTime = CurTime()
-
     self.NextPassSound = CurTime() + math.Rand(3, 6)
 
     local spawnPos = self.CenterPos - self.CallDir * 2000
     spawnPos = Vector(spawnPos.x, spawnPos.y, self.sky)
-
     if not util.IsInWorld(spawnPos) then
-        self:Debug("Primary spawnPos out of world, trying center fallback")
         spawnPos = Vector(self.CenterPos.x, self.CenterPos.y, self.sky)
     end
-
-    if not util.IsInWorld(spawnPos) then
-        self:Debug("Fallback spawnPos out of world too")
-        self:Remove()
-        return
-    end
+    if not util.IsInWorld(spawnPos) then self:Debug("Fallback spawnPos out of world too") self:Remove() return end
 
     self:SetModel("models/military2/air/air_130_l.mdl")
     self:PhysicsInit(SOLID_VPHYSICS)
@@ -166,10 +142,9 @@ function ENT:Initialize()
 
     self.JitterPhase     = math.Rand(0, math.pi * 2)
     self.JitterAmplitude = 5
-
-    self.SmoothedRoll  = 0
-    self.SmoothedPitch = 0
-    self.PrevYaw       = self:GetAngles().y
+    self.SmoothedRoll    = 0
+    self.SmoothedPitch   = 0
+    self.PrevYaw         = self:GetAngles().y
 
     self.PhysObj = self:GetPhysicsObject()
     if IsValid(self.PhysObj) then
@@ -178,53 +153,35 @@ function ENT:Initialize()
     end
 
     self.IdleLoop = CreateSound(self, "ac-130_kill_sounds/AC130_idle_inside.mp3")
-    if self.IdleLoop then
-        self.IdleLoop:SetSoundLevel(60)
-        self.IdleLoop:Play()
-    end
+    if self.IdleLoop then self.IdleLoop:SetSoundLevel(60) self.IdleLoop:Play() end
 
     self.PlaneAmbientLoop = CreateSound(self, self.Plane_Ambient_SoundPath)
-    if self.PlaneAmbientLoop then
-        self.PlaneAmbientLoop:SetSoundLevel(80)
-        self.PlaneAmbientLoop:Play()
-    end
+    if self.PlaneAmbientLoop then self.PlaneAmbientLoop:SetSoundLevel(80) self.PlaneAmbientLoop:Play() end
 
     self.NextSpraySoundTime = 0
-
     sound.Play(table.Random(PASS_SOUNDS), self.CenterPos, 75, 100, 0.7)
     self:Debug("Spawned at " .. tostring(spawnPos))
 
     self.CurrentWeapon      = nil
     self.WeaponWindowEnd    = 0
-
     self.NextShotTime40     = 0
     self.NextShotTime105    = 0
     self.NextShotTimeSpray  = 0
     self.SprayBulletCount   = 0
-
     self.GAU_BurstTimes     = {}
     self.GAU_BurstsFired    = 0
     self.GAU_ActiveBursts   = {}
-
     self.GAU_SweepStartPos  = nil
     self.GAU_SweepEndPos    = nil
     self.GAU_SweepMuzzlePos = nil
-
     self.MuzzleIndexGlobal  = 1
     self.MuzzleIndexWeapon  = 1
+    self.IsDestroyed        = false
+    self.DamageTier         = 0
+    self.JASSM_DeployCount  = 0
 
-    self.IsDestroyed  = false
-    self.DamageTier   = 0
-    self.JASSM_DeployCount = 0
-
-    if not HasGred() then
-        self:Debug("WARNING: Gred base not found; falling back to rpg_missile.")
-    end
+    if not HasGred() then self:Debug("WARNING: Gred base not found; falling back to rpg_missile.") end
 end
-
--- ============================================================
--- DAMAGE HANDLING
--- ============================================================
 
 function ENT:BroadcastDamageTier(tier)
     net.Start("bombin_plane_damage_tier")
@@ -254,10 +211,7 @@ function ENT:OnTakeDamage(dmginfo)
     self:SetNWInt("HP", hp)
     self:Debug("Hit! HP remaining: " .. tostring(hp))
     self:CheckDamageTier(hp)
-    if hp <= 0 then
-        self:Debug("Shot down!")
-        self:DestroyPlane()
-    end
+    if hp <= 0 then self:Debug("Shot down!") self:DestroyPlane() end
 end
 
 function ENT:DestroyPlane()
@@ -278,15 +232,8 @@ function ENT:DestroyPlane()
     self:Remove()
 end
 
--- ============================================================
--- THINK
--- ============================================================
-
 function ENT:Think()
-    if not self.DieTime or not self.SpawnTime then
-        self:NextThink(CurTime() + 0.1)
-        return true
-    end
+    if not self.DieTime or not self.SpawnTime then self:NextThink(CurTime() + 0.1) return true end
     local ct = CurTime()
     if ct >= self.DieTime then self:Remove() return end
     if not IsValid(self.PhysObj) then self.PhysObj = self:GetPhysicsObject() end
@@ -300,10 +247,6 @@ function ENT:Think()
     self:NextThink(ct)
     return true
 end
-
--- ============================================================
--- FLIGHT / ORBIT
--- ============================================================
 
 function ENT:PhysicsUpdate(phys)
     if not self.DieTime or not self.sky then return end
@@ -323,8 +266,7 @@ function ENT:PhysicsUpdate(phys)
     local dist       = flatPos:Distance(flatCenter)
     local orbitYaw = 0
     if dist > self.OrbitRadius and (self.TurnDelay or 0) < CurTime() then
-        orbitYaw       = 0.1
-        self.TurnDelay = CurTime() + 0.02
+        orbitYaw = 0.1 self.TurnDelay = CurTime() + 0.02
     end
     local trSkyCheck = util.QuickTrace(self:GetPos(), self:GetForward() * 3000, self)
     local skyYaw = 0
@@ -349,46 +291,26 @@ function ENT:PhysicsUpdate(phys)
     if not self:IsInWorld() then self:Debug("Plane moved out of world") self:Remove() end
 end
 
--- ============================================================
--- WEAPON WINDOW CONTROLLER
--- ============================================================
-
 function ENT:HandleWeaponWindow(ct)
-    if not self.CurrentWeapon or ct >= self.WeaponWindowEnd then
-        self:PickNewWeapon(ct)
-    end
-    if self.CurrentWeapon == "25mm" then
-        self:Update25mmBurstsSchedule(ct)
-    elseif self.CurrentWeapon == "40mm" then
-        self:Update40mm(ct)
-    elseif self.CurrentWeapon == "105mm" then
-        self:Update105mm(ct)
-    elseif self.CurrentWeapon == "25mm_spray" then
-        self:Update25mmSpray(ct)
-    elseif self.CurrentWeapon == "jassm" then
-        self:UpdateJASSM(ct)
-    end
+    if not self.CurrentWeapon or ct >= self.WeaponWindowEnd then self:PickNewWeapon(ct) end
+    if self.CurrentWeapon == "25mm"       then self:Update25mmBurstsSchedule(ct)
+    elseif self.CurrentWeapon == "40mm"   then self:Update40mm(ct)
+    elseif self.CurrentWeapon == "105mm"  then self:Update105mm(ct)
+    elseif self.CurrentWeapon == "25mm_spray" then self:Update25mmSpray(ct)
+    elseif self.CurrentWeapon == "jassm" then self:UpdateJASSM(ct) end
 end
 
 function ENT:PickNewWeapon(ct)
     self:StopSprayLoop()
     local roll = math.random(1, 5)
-    if roll == 1 then
-        self.CurrentWeapon = "25mm"
-    elseif roll == 2 then
-        self.CurrentWeapon = "40mm"
-    elseif roll == 3 then
-        self.CurrentWeapon = "105mm"
-    elseif roll == 4 then
-        self.CurrentWeapon = "25mm_spray"
-    else
-        self.CurrentWeapon = "jassm"
-    end
+    if     roll == 1 then self.CurrentWeapon = "25mm"
+    elseif roll == 2 then self.CurrentWeapon = "40mm"
+    elseif roll == 3 then self.CurrentWeapon = "105mm"
+    elseif roll == 4 then self.CurrentWeapon = "25mm_spray"
+    else                   self.CurrentWeapon = "jassm" end
     self.WeaponWindowEnd = ct + self.WeaponWindow
     self:Debug("Picked weapon: " .. self.CurrentWeapon)
-    if self.MuzzleIndexGlobal < 1 or self.MuzzleIndexGlobal > #self.MuzzlePoints then
-        self.MuzzleIndexGlobal = 1
-    end
+    if self.MuzzleIndexGlobal < 1 or self.MuzzleIndexGlobal > #self.MuzzlePoints then self.MuzzleIndexGlobal = 1 end
     self.MuzzleIndexWeapon = self.MuzzleIndexGlobal
     self.MuzzleIndexGlobal = self.MuzzleIndexGlobal + 1
     if self.MuzzleIndexGlobal > #self.MuzzlePoints then self.MuzzleIndexGlobal = 1 end
@@ -416,27 +338,14 @@ function ENT:PickNewWeapon(ct)
     end
 end
 
--- ============================================================
--- SPRAY SOUND / FLASH WINDOW
--- ============================================================
-
-function ENT:StartSprayLoop(soundPath)
-    self.NextSpraySoundTime = CurTime()
-end
-
-function ENT:StopSprayLoop()
-    self.NextSpraySoundTime = 0
-end
+function ENT:StartSprayLoop(soundPath) self.NextSpraySoundTime = CurTime() end
+function ENT:StopSprayLoop() self.NextSpraySoundTime = 0 end
 
 function ENT:PlaySpraySoundAndFlash(ct)
     sound.Play(table.Random(GAU_BRRT_SOUNDS), self.CenterPos, 110, math.random(96, 104), 1.0)
     self:SpawnWeaponMuzzleFX("cball_explode", 1)
     self.NextSpraySoundTime = ct + self.GAU_SpraySoundDelay
 end
-
--- ============================================================
--- TARGET / MUZZLE HELPERS
--- ============================================================
 
 function ENT:GetPrimaryTarget()
     local closest, closestDist = nil, math.huge
@@ -454,10 +363,7 @@ function ENT:GetTargetGroundPos()
     if IsValid(target) then
         basePos = target:GetPos()
     else
-        local tr = util.QuickTrace(
-            Vector(self.CenterPos.x, self.CenterPos.y, self.sky),
-            Vector(0, 0, -30000), self
-        )
+        local tr = util.QuickTrace(Vector(self.CenterPos.x, self.CenterPos.y, self.sky), Vector(0, 0, -30000), self)
         basePos = tr.HitPos
     end
     local offsetDist = math.Rand(self.GAU_TargetOffsetMin, self.GAU_TargetOffsetMax)
@@ -477,31 +383,8 @@ function ENT:GetMuzzlePos()
     return muzzle
 end
 
-function ENT:GetConeAimedDirection(baseConeDeg)
-    local muzzlePos = self:GetMuzzlePos()
-    local target    = self:GetPrimaryTarget()
-    local targetPos
-    if IsValid(target) then
-        targetPos = target:EyePos()
-    else
-        targetPos = Vector(self.CenterPos.x, self.CenterPos.y, self.CenterPos.z + 8)
-    end
-    local aimDir = targetPos - muzzlePos
-    if aimDir:LengthSqr() <= 1 then aimDir = self:GetAngles():Forward() end
-    aimDir:Normalize()
-    local cone = math.rad(baseConeDeg)
-    local ang  = aimDir:Angle()
-    ang:RotateAroundAxis(ang:Up(),    math.Rand(-cone, cone))
-    ang:RotateAroundAxis(ang:Right(), math.Rand(-cone * 0.5, cone * 0.5))
-    local dir = ang:Forward()
-    dir:Normalize()
-    return dir, muzzlePos
-end
-
 function ENT:GetWeaponMuzzleWorldPos()
-    if self.MuzzleIndexWeapon < 1 or self.MuzzleIndexWeapon > #self.MuzzlePoints then
-        self.MuzzleIndexWeapon = 1
-    end
+    if self.MuzzleIndexWeapon < 1 or self.MuzzleIndexWeapon > #self.MuzzlePoints then self.MuzzleIndexWeapon = 1 end
     return self:LocalToWorld(self.MuzzlePoints[self.MuzzleIndexWeapon])
 end
 
@@ -519,75 +402,27 @@ function ENT:SpawnWeaponMuzzleFX(effectName, scale)
 end
 
 -- ============================================================
--- GAU SHARED HELPERS
--- ============================================================
-
-function ENT:SpawnGAUImpactFX(impactPos)
-    local ed1 = EffectData() ed1:SetOrigin(impactPos) ed1:SetScale(1.5) ed1:SetMagnitude(1.5) ed1:SetRadius(40)
-    util.Effect("gred_ground_impact", ed1, true, true)
-    local ed2 = EffectData() ed2:SetOrigin(impactPos) ed2:SetScale(0.5) ed2:SetMagnitude(0.5) ed2:SetRadius(4)
-    util.Effect("Sparks", ed2, true, true)
-    net.Start("gred_net_createimpact")
-        net.WriteVector(impactPos)
-        net.WriteAngle(Angle(0,0,0))
-        net.WriteUInt(0, 5)
-        net.WriteUInt(GAU_CAL_ID, 4)
-    net.Broadcast()
-    sound.Play(table.Random(GAU_IMPACT_SOUNDS), impactPos, 75, math.random(95, 105), 0.8)
-end
-
-function ENT:SpawnGAUHEIRound(impactPos)
-    if not HasGred() then return end
-    local shell = gred.CreateShell(
-        impactPos + Vector(0,0,30), Angle(90,0,0),
-        self, { self }, 20, "HE", 80, 0.1, nil, 60, nil, 0.005
-    )
-    if IsValid(shell) then
-        if shell.Arm then shell:Arm() end
-        if shell.SetArmed then shell:SetArmed(true) end
-        shell.Armed         = true
-        shell.ShouldExplode = true
-        local phys = shell:GetPhysicsObject()
-        if IsValid(phys) then phys:EnableGravity(true) phys:SetVelocity(Vector(0,0,-8000)) end
-    end
-end
-
--- ============================================================
--- GAU FIRE
+-- GAU FIRE  --  uses ent_bombin_gau_bullet (ka52 pattern)
 -- ============================================================
 
 function ENT:FireGAUBulletAt(muzzlePos, impactPos, bulletIndex)
-    -- Trace straight down from sky to find actual ground contact point
-    local traceStart = Vector(impactPos.x, impactPos.y, self.sky + 100)
-    local traceEnd   = Vector(impactPos.x, impactPos.y, impactPos.z - 128)
-    local tr = util.TraceLine({
-        start  = traceStart,
-        endpos = traceEnd,
-        filter = self,
-        mask   = MASK_SHOT,
-    })
-    local groundPos = tr.HitPos
+    local dir = impactPos - muzzlePos
+    if dir:LengthSqr() < 1 then return end
+    dir:Normalize()
 
-    -- Tracer: broadcast muzzle -> impact direction to traj_gau system
-    if traj_gau_broadcast then
-        local dir = groundPos - muzzlePos
-        if dir:LengthSqr() > 1 then
-            dir:Normalize()
-            traj_gau_broadcast(self, muzzlePos, dir)
-        end
-    end
-
-    self:SpawnGAUImpactFX(groundPos)
-    util.BlastDamage(self, self, groundPos + Vector(0,0,36), self.GAU_BlastRadius, self.GAU_BulletDamage)
-
-    if bulletIndex % self.GAU_HEI_Interval == 0 then
-        self:SpawnGAUHEIRound(groundPos)
-    end
+    local bullet = ents.Create("ent_bombin_gau_bullet")
+    if not IsValid(bullet) then return end
+    bullet:SetPos(muzzlePos)
+    bullet:SetAngles(dir:Angle())
+    bullet.Firer      = self
+    bullet.MuzzlePos  = muzzlePos
+    bullet.BulletIndex = bulletIndex or 1
+    bullet.HEIInterval = self.GAU_HEI_Interval
+    bullet.BulletRad   = self.GAU_BlastRadius
+    bullet.BulletDmg   = self.GAU_BulletDamage
+    bullet:Spawn()
+    bullet:Activate()
 end
-
--- ============================================================
--- SLOT 1 — 25mm GAU BURST
--- ============================================================
 
 function ENT:Update25mmBurstsSchedule(ct)
     if not self.GAU_BurstTimes then return end
@@ -644,15 +479,9 @@ function ENT:FireSingleGAUBullet(bulletIndex)
     self:FireGAUBulletAt(muzzlePos, baseImpact + jitter, bulletIndex)
 end
 
--- ============================================================
--- SLOT 2 — 25mm GAU SPRAY
--- ============================================================
-
 function ENT:Update25mmSpray(ct)
     if ct >= self.WeaponWindowEnd then self:StopSprayLoop() return end
-    if self.NextSpraySoundTime > 0 and ct >= self.NextSpraySoundTime then
-        self:PlaySpraySoundAndFlash(ct)
-    end
+    if self.NextSpraySoundTime > 0 and ct >= self.NextSpraySoundTime then self:PlaySpraySoundAndFlash(ct) end
     if ct < self.NextShotTimeSpray then return end
     self.NextShotTimeSpray = ct + self.GAU_Spray_Delay
     self.SprayBulletCount  = self.SprayBulletCount + 1
@@ -666,28 +495,18 @@ function ENT:Update25mmSpray(ct)
     self:FireGAUBulletAt(muzzlePos, finalImpact, self.SprayBulletCount)
 end
 
--- ============================================================
--- SLOT 3 — 40mm
--- ============================================================
-
 function ENT:Update40mm(ct)
     if not self.NextShotTime40 or ct < self.NextShotTime40 then return end
     self.NextShotTime40 = ct + self.GUN40_Delay
     local muzzlePos = self:GetMuzzlePos()
     local aimTarget = self:GetTargetGroundPos() + Vector(
         math.Rand(-self.GUN40_Scatter, self.GUN40_Scatter),
-        math.Rand(-self.GUN40_Scatter, self.GUN40_Scatter),
-        0
-    )
+        math.Rand(-self.GUN40_Scatter, self.GUN40_Scatter), 0)
     local dir = aimTarget - muzzlePos
     if dir:LengthSqr() < 1 then return end
     dir:Normalize()
     if HasGred() then
-        local shell = gred.CreateShell(
-            muzzlePos, dir:Angle(), self, { self },
-            40, "HE", 800, 0.9, "yellow",
-            self.GUN40_Damage, nil, self.GUN40_TNT
-        )
+        local shell = gred.CreateShell(muzzlePos, dir:Angle(), self, { self }, 40, "HE", 800, 0.9, "yellow", self.GUN40_Damage, nil, self.GUN40_TNT)
         if IsValid(shell) then
             if shell.Arm then shell:Arm() end
             if shell.SetArmed then shell:SetArmed(true) end
@@ -698,8 +517,7 @@ function ENT:Update40mm(ct)
     else
         local m = ents.Create("rpg_missile")
         if IsValid(m) then
-            m:SetPos(muzzlePos) m:SetAngles(dir:Angle()) m:SetOwner(self)
-            m:Spawn() m:Activate()
+            m:SetPos(muzzlePos) m:SetAngles(dir:Angle()) m:SetOwner(self) m:Spawn() m:Activate()
             local phys = m:GetPhysicsObject()
             if IsValid(phys) then phys:SetVelocity(dir * 1600) end
         end
@@ -707,10 +525,6 @@ function ENT:Update40mm(ct)
     self:SpawnWeaponMuzzleFX("cball_explode", 2)
     sound.Play("killstreak_rewards/ac-130_40mm_fire.wav", self.CenterPos, 110, math.random(96, 104), 1.0)
 end
-
--- ============================================================
--- SLOT 4 — 105mm
--- ============================================================
 
 function ENT:Spawn105mmEffects(pos)
     local ed1 = EffectData() ed1:SetOrigin(pos) ed1:SetScale(6) ed1:SetMagnitude(6) ed1:SetRadius(600) util.Effect("500lb_air", ed1, true, true)
@@ -726,18 +540,12 @@ function ENT:Update105mm(ct)
     local muzzlePos = self:GetMuzzlePos()
     local aimTarget = self:GetTargetGroundPos() + Vector(
         math.Rand(-self.GUN105_Scatter, self.GUN105_Scatter),
-        math.Rand(-self.GUN105_Scatter, self.GUN105_Scatter),
-        0
-    )
+        math.Rand(-self.GUN105_Scatter, self.GUN105_Scatter), 0)
     local dir = aimTarget - muzzlePos
     if dir:LengthSqr() < 1 then return end
     dir:Normalize()
     if HasGred() then
-        local shell = gred.CreateShell(
-            muzzlePos, dir:Angle(), self, { self },
-            105, "HE", 600, 15, "white",
-            self.GUN105_Damage, nil, self.GUN105_TNT
-        )
+        local shell = gred.CreateShell(muzzlePos, dir:Angle(), self, { self }, 105, "HE", 600, 15, "white", self.GUN105_Damage, nil, self.GUN105_TNT)
         if IsValid(shell) then
             if shell.Arm then shell:Arm() end
             if shell.SetArmed then shell:SetArmed(true) end
@@ -764,8 +572,7 @@ function ENT:Update105mm(ct)
     else
         local m = ents.Create("rpg_missile")
         if IsValid(m) then
-            m:SetPos(muzzlePos) m:SetAngles(dir:Angle()) m:SetOwner(self)
-            m:Spawn() m:Activate()
+            m:SetPos(muzzlePos) m:SetAngles(dir:Angle()) m:SetOwner(self) m:Spawn() m:Activate()
             local phys = m:GetPhysicsObject()
             if IsValid(phys) then phys:SetVelocity(dir * 1800) end
         end
@@ -774,17 +581,10 @@ function ENT:Update105mm(ct)
     sound.Play("killstreak_rewards/ac-130_105mm_fire.wav", self.CenterPos, 110, math.random(96, 104), 1.0)
 end
 
--- ============================================================
--- SLOT 5 — AGM-158 JASSM
--- ============================================================
-
 function ENT:UpdateJASSM(ct)
     if self.JASSM_Fired then return end
     self.JASSM_Fired = true
-    if not scripted_ents.GetStored("ent_bombin_jassm") then
-        self:Debug("JASSM: ent_bombin_jassm not registered, skipping")
-        return
-    end
+    if not scripted_ents.GetStored("ent_bombin_jassm") then self:Debug("JASSM: ent_bombin_jassm not registered, skipping") return end
     local planePos  = self:GetPos()
     local backward  = -self:GetForward()
     backward.z      = 0
@@ -797,31 +597,23 @@ function ENT:UpdateJASSM(ct)
         planePos.y + backward.y * self.OrbitRadius * 1.2,
         jassmAlt
     )
-    if not util.IsInWorld(spawnPos) then
-        spawnPos = Vector(self.CenterPos.x, self.CenterPos.y, jassmAlt)
-    end
+    if not util.IsInWorld(spawnPos) then spawnPos = Vector(self.CenterPos.x, self.CenterPos.y, jassmAlt) end
     local callDir = self:GetForward()
     callDir.z     = 0
     if callDir:LengthSqr() < 0.01 then callDir = Vector(1,0,0) end
     callDir:Normalize()
     local jassm = ents.Create("ent_bombin_jassm")
     if not IsValid(jassm) then self:Debug("JASSM: ents.Create failed") return end
-    jassm:SetPos(spawnPos)
-    jassm:SetAngles(callDir:Angle())
+    jassm:SetPos(spawnPos) jassm:SetAngles(callDir:Angle())
     jassm:SetVar("CenterPos",    self.CenterPos)
     jassm:SetVar("CallDir",      callDir)
     jassm:SetVar("Lifetime",     math.min(self.Lifetime, 35))
     jassm:SetVar("Speed",        250)
     jassm:SetVar("OrbitRadius",  self.OrbitRadius * 0.75)
     jassm:SetVar("SkyHeightAdd", math.max(jassmAlt - (self.sky - self.SkyHeightAdd), 800))
-    jassm:Spawn()
-    jassm:Activate()
+    jassm:Spawn() jassm:Activate()
     self:Debug("JASSM deployed from rear at " .. tostring(spawnPos) .. " alt=" .. tostring(jassmAlt))
 end
-
--- ============================================================
--- GROUND FINDER
--- ============================================================
 
 function ENT:FindGround(centerPos)
     local startPos   = Vector(centerPos.x, centerPos.y, centerPos.z + 64)
@@ -832,19 +624,12 @@ function ENT:FindGround(centerPos)
     while maxNumber < 100 do
         local tr = util.TraceLine(trace)
         if tr.HitWorld then return tr.HitPos.z end
-        if IsValid(tr.Entity) then
-            table.insert(filterList, tr.Entity)
-        else
-            break
-        end
+        if IsValid(tr.Entity) then table.insert(filterList, tr.Entity)
+        else break end
         maxNumber = maxNumber + 1
     end
     return -1
 end
-
--- ============================================================
--- CLEANUP
--- ============================================================
 
 function ENT:OnRemove()
     if self.IdleLoop then self.IdleLoop:Stop() end
