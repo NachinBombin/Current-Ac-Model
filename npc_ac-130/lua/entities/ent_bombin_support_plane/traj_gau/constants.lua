@@ -13,18 +13,17 @@ TRAJ_GAU = {
     max_distance       = 22000,
     damage_force_mul   = 5.0,
 
-    -- Tracers
+    -- Buffer
+    buffer_size        = 128,
+
+    -- Tracers (exaggerated — heli standard)
     tracer_core  = Color(255, 100,  0, 255),
     tracer_glow  = Color(255, 200, 80, 120),
 
     -- Rendering
     render_enabled     = true,
-    min_trail_length   = 8,
-    distance_scale_max = 2.0,
-
-    -- Net
-    net_reliable = false,
-    buffer_size  = 128,
+    min_trail_length   = 120,
+    distance_scale_max = 6.0,
 }
 
 print("[TrajGAU] constants loaded.")

@@ -1,18 +1,8 @@
 AddCSLuaFile()
 
-traj_gau_disable_hook = traj_gau_disable_hook or false
-
-if SERVER then
-    hook.Add("EntityFireBullets", "traj_gau_intercept", function(shooter, data)
-        if traj_gau_disable_hook then return end
-
-        local inflictor = data.Inflictor
-        if not IsValid(inflictor) then return end
-        if inflictor:GetClass() ~= "ent_bombin_support_plane" then return end
-
-        traj_gau_broadcast(shooter, data.Src, data.Dir:GetNormalized())
-        return false
-    end)
-end
+-- firebullets.lua is kept for compatibility but the EntityFireBullets hook is
+-- not used by the AC-130 (it calls traj_gau_broadcast directly). The hook is
+-- disabled by default to avoid interfering with other addons.
+traj_gau_disable_hook = true
 
 print("[TrajGAU] firebullets loaded.")
