@@ -173,7 +173,6 @@ function ENT:Initialize()
     self.GAU_ActiveBursts   = {}
     self.GAU_SweepStartPos  = nil
     self.GAU_SweepEndPos    = nil
-    self.GAU_SweepMuzzlePos = nil
     self.MuzzleIndexGlobal  = 1
     self.MuzzleIndexWeapon  = 1
     self.IsDestroyed        = false
@@ -326,13 +325,14 @@ function ENT:PickNewWeapon(ct)
         self.NextShotTimeSpray  = ct
         self.NextSpraySoundTime = ct
         self.SprayBulletCount   = 0
+        -- Compute sweep ground targets once at burst start (these don't need to move)
         local targetPos = self:GetTargetGroundPos()
         local sweepDir  = Vector(math.Rand(-1,1), math.Rand(-1,1), 0)
         if sweepDir:LengthSqr() < 0.01 then sweepDir = Vector(1,0,0) end
         sweepDir:Normalize()
-        self.GAU_SweepStartPos  = targetPos - sweepDir * self.GAU_SweepHalfLength
-        self.GAU_SweepEndPos    = targetPos + sweepDir * self.GAU_SweepHalfLength
-        self.GAU_SweepMuzzlePos = self:GetMuzzlePos()
+        self.GAU_SweepStartPos = targetPos - sweepDir * self.GAU_SweepHalfLength
+        self.GAU_SweepEndPos   = targetPos + sweepDir * self.GAU_SweepHalfLength
+        -- NOTE: muzzle is NOT cached here -- it is sampled live per bullet
     elseif self.CurrentWeapon == "jassm" then
         self.JASSM_Fired = false
     end
@@ -437,13 +437,12 @@ end
 
 function ENT:StartGAUBurst()
     local targetPos = self:GetTargetGroundPos()
-    local muzzlePos = self:GetMuzzlePos()
     local sweepDir  = Vector(math.Rand(-1,1), math.Rand(-1,1), 0)
     if sweepDir:LengthSqr() < 0.01 then sweepDir = Vector(1,0,0) end
     sweepDir:Normalize()
-    self.GAU_SweepStartPos  = targetPos - sweepDir * self.GAU_SweepHalfLength
-    self.GAU_SweepEndPos    = targetPos + sweepDir * self.GAU_SweepHalfLength
-    self.GAU_SweepMuzzlePos = muzzlePos
+    self.GAU_SweepStartPos = targetPos - sweepDir * self.GAU_SweepHalfLength
+    self.GAU_SweepEndPos   = targetPos + sweepDir * self.GAU_SweepHalfLength
+    -- NOTE: muzzle is NOT stored here -- sampled live in FireSingleGAUBullet
     table.insert(self.GAU_ActiveBursts, { bulletsFired = 0, nextTime = CurTime() })
     self:SpawnWeaponMuzzleFX("cball_explode", 1)
     sound.Play(table.Random(GAU_BRRT_SOUNDS), self.CenterPos, 110, math.random(96, 104), 1.0)
@@ -475,7 +474,8 @@ function ENT:FireSingleGAUBullet(bulletIndex)
         math.Rand(-self.GAU_JitterAmount, self.GAU_JitterAmount),
         0
     )
-    local muzzlePos = self.GAU_SweepMuzzlePos or self:GetMuzzlePos()
+    -- Sample the live muzzle position this exact tick -- plane may have moved since burst start
+    local muzzlePos = self:GetWeaponMuzzleWorldPos()
     self:FireGAUBulletAt(muzzlePos, baseImpact + jitter, bulletIndex)
 end
 
@@ -491,7 +491,8 @@ function ENT:Update25mmSpray(ct)
         math.Rand(-self.GAU_JitterAmount * 2, self.GAU_JitterAmount * 2),
         0
     )
-    local muzzlePos = self.GAU_SweepMuzzlePos or self:GetMuzzlePos()
+    -- Sample the live muzzle position this exact tick -- plane may have moved since spray start
+    local muzzlePos = self:GetWeaponMuzzleWorldPos()
     self:FireGAUBulletAt(muzzlePos, finalImpact, self.SprayBulletCount)
 end
 
