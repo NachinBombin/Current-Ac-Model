@@ -2,21 +2,40 @@ include("shared.lua")
 include("cl_trailsystem.lua")
 
 -- ============================================================
--- PRECACHE — only one PCF particle, confirmed working
+-- PRECACHE
 -- ============================================================
 game.AddParticles("particles/fire_01.pcf")
 PrecacheParticleSystem("fire_medium_02")
 
 -- ============================================================
--- SOUND BROADCAST
+-- SOUND TRAVEL DELAY
+-- Speed of sound in Source engine units: 34300 u/s (343 m/s, 1 unit = 1 cm).
+-- Each client calculates its own delay based on its eye position to the
+-- event origin. This means a player 34300 units away hears the sound 1 second
+-- after the visual flash, physically accurate to real artillery distances.
 -- ============================================================
+local SOUND_SPEED_UNITS = 34300
+
 net.Receive("bombin_plane_sound", function()
-    local path   = net.ReadString()
-    local pos    = net.ReadVector()
-    local level  = net.ReadUInt(8)
-    local pitch  = net.ReadUInt(8)
-    local volume = net.ReadFloat()
-    sound.Play(path, pos, level, pitch, volume)
+    local path       = net.ReadString()
+    local pos        = net.ReadVector()
+    local level      = net.ReadUInt(8)
+    local pitch      = net.ReadUInt(8)
+    local volume     = net.ReadFloat()
+    local extraDelay = net.ReadFloat()
+
+    -- Per-client distance delay: each player computes from their own eye position
+    local distDelay  = EyePos():Distance(pos) / SOUND_SPEED_UNITS
+    local totalDelay = math.max(0, extraDelay) + distDelay
+
+    if totalDelay < 0.05 then
+        -- Close enough: play immediately, skip timer overhead
+        sound.Play(path, pos, level, pitch, volume)
+    else
+        timer.Simple(totalDelay, function()
+            sound.Play(path, pos, level, pitch, volume)
+        end)
+    end
 end)
 
 -- ============================================================
@@ -143,8 +162,7 @@ net.Receive("bombin_plane_damage_tier", function()
     local tier     = net.ReadUInt(2)
     local ent      = Entity(entIndex)
 
-    -- Trail system tier update
-    PlaneTrailSystem_SetTier( entIndex, tier )
+    PlaneTrailSystem_SetTier(entIndex, tier)
 
     local state = PlaneStates[entIndex]
     if not state then
