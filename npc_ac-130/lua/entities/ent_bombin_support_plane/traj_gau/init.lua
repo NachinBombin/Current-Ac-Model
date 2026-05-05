@@ -1,13 +1,3 @@
-AddCSLuaFile("traj_gau/constants.lua")
-AddCSLuaFile("traj_gau/net.lua")
-AddCSLuaFile("traj_gau/firebullets.lua")
-AddCSLuaFile("traj_gau/move.lua")
-AddCSLuaFile("traj_gau/render.lua")
-
-include("traj_gau/constants.lua")
-include("traj_gau/net.lua")
-include("traj_gau/firebullets.lua")
-include("traj_gau/move.lua")
-include("traj_gau/render.lua")
-
-print("[TrajGAU] fully loaded.")
+-- DEAD DUPLICATE -- this folder is never loaded by GMod.
+-- All traj_gau files live in lua/traj_gau/ instead.
+-- This file intentionally left as a tombstone.
