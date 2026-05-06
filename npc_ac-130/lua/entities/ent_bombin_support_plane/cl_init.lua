@@ -5,25 +5,27 @@ game.AddParticles("particles/fire_01.pcf")
 PrecacheParticleSystem("fire_medium_02")
 
 -- ============================================================
--- SOUND TRAVEL DELAY CONSTANTS
--- SOUND_SPEED_UNITS: real speed of sound (34300 u/s) used for
---   all non-GAU weapon sounds (40mm, 105mm, pass, destruction).
--- GAU_SOUND_SPEED: exaggerated value used only for the brrt.
---   At 6000 units altitude a player on the ground hears the
---   brrt ~0.75s after the muzzle flash (vs ~0.17s realistic).
---   This makes the flash→crack gap very noticeable in gameplay.
+-- SOUND LEVEL CONSTANTS (client)
+-- sound.Play on the client ignores the level parameter for
+-- volume rolloff — the engine treats it as a 2D non-spatialized
+-- call regardless. We pass 255 to ensure the engine never
+-- silences the sound due to level math, and rely on the
+-- distance-based delay alone for spatial perception.
+-- For ambient/pass sounds we use 160 so they still fade
+-- naturally with distance (those go through EmitSound on an ent).
 -- ============================================================
+local SND_LEVEL_GAU    = 255   -- brrt: 2D, ignore rolloff, full volume always
+local SND_LEVEL_WEAPON = 255   -- 40mm / 105mm / pass / destruct: same reason
 local SOUND_SPEED_UNITS = 34300
 local GAU_SOUND_SPEED   = 8000
 
 -- ============================================================
 -- GENERIC PLANE SOUND (40mm, 105mm, pass, destruction)
--- Delay = player's distance to event / SOUND_SPEED_UNITS.
 -- ============================================================
 net.Receive("bombin_plane_sound", function()
     local path       = net.ReadString()
     local pos        = net.ReadVector()
-    local level      = net.ReadUInt(8)
+    local level      = net.ReadUInt(8)   -- server hint; we override to SND_LEVEL_WEAPON
     local pitch      = net.ReadUInt(8)
     local volume     = net.ReadFloat()
     local extraDelay = net.ReadFloat()
@@ -31,25 +33,24 @@ net.Receive("bombin_plane_sound", function()
     local distDelay  = EyePos():Distance(pos) / SOUND_SPEED_UNITS
     local totalDelay = math.max(0, extraDelay) + distDelay
 
+    local function play()
+        sound.Play(path, pos, SND_LEVEL_WEAPON, pitch, volume)
+    end
+
     if totalDelay < 0.05 then
-        sound.Play(path, pos, level, pitch, volume)
+        play()
     else
-        timer.Simple(totalDelay, function()
-            sound.Play(path, pos, level, pitch, volume)
-        end)
+        timer.Simple(totalDelay, play)
     end
 end)
 
 -- ============================================================
 -- GAU MUZZLE FLASH + BRRT
--- The server sends this once per burst/spray tick.
--- Flash:  rendered IMMEDIATELY via util.Effect (no delay).
--- Sound:  scheduled with exaggerated GAU_SOUND_SPEED delay.
---
--- Why separate from bombin_plane_sound:
---   We need the flash rendered at time=0 but the sound at
---   time = dist / GAU_SOUND_SPEED. If both travelled through
---   bombin_plane_sound the flash would be delayed too.
+-- Flash: immediate. Brrt: delayed by dist / GAU_SOUND_SPEED.
+-- sound.Play is used (not EmitSound) because we need the sound
+-- to play at FULL volume regardless of player distance —
+-- the delay is the only spatial cue we rely on.
+-- Level 255 prevents the engine from rolling off the sound.
 -- ============================================================
 net.Receive("bombin_gau_muzzle_flash", function()
     local muzzlePos  = net.ReadVector()
@@ -57,7 +58,7 @@ net.Receive("bombin_gau_muzzle_flash", function()
     local soundPath  = net.ReadString()
     local soundSpeed = net.ReadFloat()
 
-    -- Flash: immediate, no delay
+    -- Flash: immediate
     local ed = EffectData()
     ed:SetOrigin(muzzlePos)
     ed:SetScale(scale)
@@ -65,7 +66,6 @@ net.Receive("bombin_gau_muzzle_flash", function()
     ed:SetRadius(8 * scale)
     util.Effect("cball_explode", ed)
 
-    -- Two small spark bursts at the muzzle for extra flash pop
     for _ = 1, 2 do
         local sp = EffectData()
         sp:SetOrigin(muzzlePos + Vector(math.Rand(-4,4), math.Rand(-4,4), 0))
@@ -76,20 +76,28 @@ net.Receive("bombin_gau_muzzle_flash", function()
         util.Effect("ManhackSparks", sp)
     end
 
-    -- Brrt sound: delayed by exaggerated sound speed
-    if soundPath ~= "" then
-        local dist  = EyePos():Distance(muzzlePos)
-        local delay = dist / math.max(soundSpeed, 100)
-        if delay < 0.05 then
-            sound.Play(soundPath, muzzlePos, 110, math.random(96, 104), 1.0)
-        else
-            -- Capture values so the closure is safe
-            local capPath  = soundPath
-            local capPos   = Vector(muzzlePos.x, muzzlePos.y, muzzlePos.z)
-            timer.Simple(delay, function()
-                sound.Play(capPath, capPos, 110, math.random(96, 104), 1.0)
-            end)
-        end
+    if soundPath == "" then return end
+
+    local dist  = EyePos():Distance(muzzlePos)
+    local delay = dist / math.max(soundSpeed, 100)
+
+    -- pitch varies slightly per-shot for organic feel
+    local pitch = math.random(90, 105)
+
+    local capPath  = soundPath
+    local capPos   = Vector(muzzlePos.x, muzzlePos.y, muzzlePos.z)
+
+    local function playBrrt()
+        -- Level 255: engine will not attenuate this sound by distance.
+        -- Volume 1.0: full amplitude. This ensures the brrt is always
+        -- loud and clear; only the delay gives the player distance info.
+        sound.Play(capPath, capPos, SND_LEVEL_GAU, pitch, 1.0)
+    end
+
+    if delay < 0.05 then
+        playBrrt()
+    else
+        timer.Simple(delay, playBrrt)
     end
 end)
 
