@@ -6,22 +6,13 @@ local function HasGred()
     return gred and gred.CreateBullet and gred.CreateShell
 end
 
-local SOUND_SPEED_UNITS = 34300
-local GAU_SOUND_SPEED   = 8000
-
-local SND_LEVEL_AMBIENT  = 90
-local SND_LEVEL_WEAPONS  = 160
-local SND_LEVEL_PASS     = 155
-local SND_LEVEL_DESTRUCT = 160
-
-local PRECALC_SOUNDS = {
+local PASS_SOUNDS = {
     "killstreak_rewards/ac-130_105mm_fire.wav",
     "killstreak_rewards/ac-130_40mm_fire.wav",
     "killstreak_rewards/ac-130_25mm_fire.wav",
-    "gunsounds/brrt_01.wav",
-    "gunsounds/brrt_02.wav",
-    "gunsounds/brrt_03.wav",
-    "gunsounds/brrt_04.wav",
+}
+
+local GAU_IMPACT_SOUNDS = {
     "physics/concrete/impact_bullet1.wav",
     "physics/concrete/impact_bullet2.wav",
     "physics/concrete/impact_bullet3.wav",
@@ -31,17 +22,6 @@ local PRECALC_SOUNDS = {
     "physics/metal/metal_solid_impact_bullet1.wav",
     "physics/metal/metal_solid_impact_bullet2.wav",
     "physics/metal/metal_solid_impact_bullet3.wav",
-    "ambient/explosions/explode_8.wav",
-    "weapon_AWP.Single",
-    "ac/ac -130B.wav",
-}
-
-for _, s in ipairs(PRECALC_SOUNDS) do util.PrecacheSound(s) end
-
-local PASS_SOUNDS = {
-    "killstreak_rewards/ac-130_105mm_fire.wav",
-    "killstreak_rewards/ac-130_40mm_fire.wav",
-    "killstreak_rewards/ac-130_25mm_fire.wav",
 }
 
 local GAU_BRRT_SOUNDS = {
@@ -51,9 +31,9 @@ local GAU_BRRT_SOUNDS = {
     "gunsounds/brrt_04.wav",
 }
 
+local GAU_CAL_ID = 3
+
 util.AddNetworkString("bombin_plane_damage_tier")
-util.AddNetworkString("bombin_plane_sound")
-util.AddNetworkString("bombin_gau_muzzle_flash")
 
 function ENT:Debug(msg)
     print("[Bombin Support Plane ENT] " .. msg)
@@ -61,7 +41,6 @@ end
 
 ENT.WeaponWindow        = 10
 ENT.AimConeDegrees      = 10
-ENT.SoundSpeedUnits     = SOUND_SPEED_UNITS
 
 ENT.GAU_FirstBurstTime  = 0
 ENT.GAU_SecondBurstTime = 5
@@ -74,8 +53,10 @@ ENT.GAU_RadiusMul       = 0.05
 ENT.GAU_SweepHalfLength = 600
 ENT.GAU_JitterAmount    = 200
 ENT.GAU_SpraySoundDelay = 1.3
+
 ENT.GAU_TargetOffsetMin = 300
 ENT.GAU_TargetOffsetMax = 900
+
 ENT.GAU_HEI_Interval    = 90
 ENT.GAU_BulletDamage    = 40
 ENT.GAU_BlastRadius     = 80
@@ -88,23 +69,18 @@ ENT.GUN40_Damage         = 300
 ENT.GUN105_Damage        = 3700
 ENT.GUN40_TNT            = 0.5
 ENT.GUN105_TNT           = 2.5
+
 ENT.GUN40_Scatter        = 600
 ENT.GUN105_Scatter       = 400
+
 ENT.GAU_Spray_Delay      = 0.033
 
 ENT.MuzzleForwardOffset  = 250
 ENT.MuzzleSideOffset     = -60
-ENT.Plane_Ambient_SoundPath = "ac/ac -130B.wav"
-
--- How far behind the model origin the tail sits.
--- air_130_l.mdl: nose-to-tail ~840u, tail is ~420u behind origin.
-local PLANE_TAIL_BACK = 420
-
--- JASSM freefall start is this many units ABOVE the plane's live Z.
--- Must match FREEFALL_DROP in ent_bombin_jassm_owned/init.lua.
-local JASSM_FREEFALL_DROP = 900
+ENT.Plane_Ambient_SoundPath = "sounds/ac/ac-130B.wav"
 
 ENT.JASSM_AltOffset = 1500
+
 ENT.MaxHP = 8000
 ENT.DamageTierThresholds = { 0.75, 0.50, 0.25 }
 
@@ -114,35 +90,13 @@ ENT.MuzzlePoints = {
     Vector(-300,-250, 50),
 }
 
-function ENT:EmitPlaneSound(path, pos, level, pitch, volume, extraDelay)
-    if not path then return end
-    net.Start("bombin_plane_sound")
-        net.WriteString(path)
-        net.WriteVector(pos or self:GetPos())
-        net.WriteUInt(math.Clamp(level  or 75,  0, 255), 8)
-        net.WriteUInt(math.Clamp(pitch  or 100, 0, 255), 8)
-        net.WriteFloat(math.max(0, volume or 1))
-        net.WriteFloat(math.max(0, extraDelay or 0))
-    net.Broadcast()
-end
-
-function ENT:BroadcastGAUFlash(muzzlePos, scale, soundPath, soundSpeed)
-    net.Start("bombin_gau_muzzle_flash")
-        net.WriteVector(muzzlePos)
-        net.WriteFloat(scale or 1)
-        net.WriteString(soundPath or "")
-        net.WriteFloat(soundSpeed or GAU_SOUND_SPEED)
-    net.Broadcast()
-end
-
 function ENT:Initialize()
-    -- Prefer fields pre-set by the spawner; fall back to defaults.
-    self.CenterPos    = self.CenterPos    or self:GetPos()
-    self.CallDir      = self.CallDir      or Vector(1, 0, 0)
-    self.Lifetime     = self.Lifetime     or 40
-    self.Speed        = self.Speed        or 300
-    self.OrbitRadius  = self.OrbitRadius  or 3000
-    self.SkyHeightAdd = self.SkyHeightAdd or 6000
+    self.CenterPos    = self:GetVar("CenterPos", self:GetPos())
+    self.CallDir      = self:GetVar("CallDir", Vector(1, 0, 0))
+    self.Lifetime     = self:GetVar("Lifetime", 40)
+    self.Speed        = self:GetVar("Speed", 300)
+    self.OrbitRadius  = self:GetVar("OrbitRadius", 3000)
+    self.SkyHeightAdd = self:GetVar("SkyHeightAdd", 6000)
 
     self.MaxHP = self.MaxHP or ENT.MaxHP or 8000
 
@@ -163,7 +117,7 @@ function ENT:Initialize()
     if not util.IsInWorld(spawnPos) then
         spawnPos = Vector(self.CenterPos.x, self.CenterPos.y, self.sky)
     end
-    if not util.IsInWorld(spawnPos) then self:Debug("Fallback spawnPos OOW") self:Remove() return end
+    if not util.IsInWorld(spawnPos) then self:Debug("Fallback spawnPos out of world too") self:Remove() return end
 
     self:SetModel("models/military2/air/air_130_l.mdl")
     self:PhysicsInit(SOLID_VPHYSICS)
@@ -199,19 +153,13 @@ function ENT:Initialize()
     end
 
     self.IdleLoop = CreateSound(self, "ac-130_kill_sounds/AC130_idle_inside.mp3")
-    if self.IdleLoop then
-        self.IdleLoop:SetSoundLevel(SND_LEVEL_AMBIENT)
-        self.IdleLoop:Play()
-    end
+    if self.IdleLoop then self.IdleLoop:SetSoundLevel(60) self.IdleLoop:Play() end
 
     self.PlaneAmbientLoop = CreateSound(self, self.Plane_Ambient_SoundPath)
-    if self.PlaneAmbientLoop then
-        self.PlaneAmbientLoop:SetSoundLevel(SND_LEVEL_AMBIENT)
-        self.PlaneAmbientLoop:Play()
-    end
+    if self.PlaneAmbientLoop then self.PlaneAmbientLoop:SetSoundLevel(80) self.PlaneAmbientLoop:Play() end
 
     self.NextSpraySoundTime = 0
-    self:EmitPlaneSound(table.Random(PASS_SOUNDS), spawnPos, SND_LEVEL_PASS, 100, 1.0, 0)
+    sound.Play(table.Random(PASS_SOUNDS), self.CenterPos, 75, 100, 0.7)
     self:Debug("Spawned at " .. tostring(spawnPos))
 
     self.CurrentWeapon      = nil
@@ -277,8 +225,8 @@ function ENT:DestroyPlane()
     local ed2 = EffectData() ed2:SetOrigin(pos) ed2:SetScale(5) ed2:SetMagnitude(5) ed2:SetRadius(500) util.Effect("500lb_air", ed2, true, true)
     local ed3 = EffectData() ed3:SetOrigin(pos + Vector(0,0,80)) ed3:SetScale(4) ed3:SetMagnitude(4) ed3:SetRadius(400) util.Effect("500lb_air", ed3, true, true)
     local ed4 = EffectData() ed4:SetOrigin(pos + Vector(0,0,180)) ed4:SetScale(3) ed4:SetMagnitude(3) ed4:SetRadius(300) util.Effect("500lb_air", ed4, true, true)
-    self:EmitPlaneSound("ambient/explosions/explode_8.wav", pos, SND_LEVEL_DESTRUCT, 90,  1.0, 0)
-    self:EmitPlaneSound("weapon_AWP.Single",               pos, SND_LEVEL_DESTRUCT, 60,  1.0, 0)
+    sound.Play("ambient/explosions/explode_8.wav", pos, 140, 90,  1.0)
+    sound.Play("weapon_AWP.Single",               pos, 145, 60,  1.0)
     util.BlastDamage(self, self, pos, 400, 200)
     self:Remove()
 end
@@ -290,7 +238,7 @@ function ENT:Think()
     if not IsValid(self.PhysObj) then self.PhysObj = self:GetPhysicsObject() end
     if IsValid(self.PhysObj) and self.PhysObj:IsAsleep() then self.PhysObj:Wake() end
     if ct >= self.NextPassSound then
-        self:EmitPlaneSound(table.Random(PASS_SOUNDS), self:GetPos(), SND_LEVEL_PASS, math.random(96, 104), 1.0, 0)
+        sound.Play(table.Random(PASS_SOUNDS), self.CenterPos, 75, math.random(96, 104), 0.7)
         self.NextPassSound = ct + math.Rand(4, 7)
     end
     self:HandleWeaponWindow(ct)
@@ -344,11 +292,11 @@ end
 
 function ENT:HandleWeaponWindow(ct)
     if not self.CurrentWeapon or ct >= self.WeaponWindowEnd then self:PickNewWeapon(ct) end
-    if self.CurrentWeapon == "25mm"           then self:Update25mmBurstsSchedule(ct)
-    elseif self.CurrentWeapon == "40mm"       then self:Update40mm(ct)
-    elseif self.CurrentWeapon == "105mm"      then self:Update105mm(ct)
+    if self.CurrentWeapon == "25mm"       then self:Update25mmBurstsSchedule(ct)
+    elseif self.CurrentWeapon == "40mm"   then self:Update40mm(ct)
+    elseif self.CurrentWeapon == "105mm"  then self:Update105mm(ct)
     elseif self.CurrentWeapon == "25mm_spray" then self:Update25mmSpray(ct)
-    elseif self.CurrentWeapon == "jassm"      then self:UpdateJASSM(ct) end
+    elseif self.CurrentWeapon == "jassm" then self:UpdateJASSM(ct) end
 end
 
 function ENT:PickNewWeapon(ct)
@@ -388,17 +336,12 @@ function ENT:PickNewWeapon(ct)
     end
 end
 
-function ENT:StartSprayLoop() self.NextSpraySoundTime = CurTime() end
-function ENT:StopSprayLoop()  self.NextSpraySoundTime = 0 end
-
-function ENT:FireGAUFlashAndSound(muzzlePos, scale)
-    local snd = table.Random(GAU_BRRT_SOUNDS)
-    self:BroadcastGAUFlash(muzzlePos, scale or 1, snd, GAU_SOUND_SPEED)
-end
+function ENT:StartSprayLoop(soundPath) self.NextSpraySoundTime = CurTime() end
+function ENT:StopSprayLoop() self.NextSpraySoundTime = 0 end
 
 function ENT:PlaySpraySoundAndFlash(ct)
-    local muzzlePos = self:GetWeaponMuzzleWorldPos()
-    self:FireGAUFlashAndSound(muzzlePos, 1)
+    sound.Play(table.Random(GAU_BRRT_SOUNDS), self.CenterPos, 110, math.random(96, 104), 1.0)
+    self:SpawnWeaponMuzzleFX("cball_explode", 1)
     self.NextSpraySoundTime = ct + self.GAU_SpraySoundDelay
 end
 
@@ -443,16 +386,34 @@ function ENT:GetWeaponMuzzleWorldPos()
     return self:LocalToWorld(self.MuzzlePoints[self.MuzzleIndexWeapon])
 end
 
+function ENT:SpawnWeaponMuzzleFX(effectName, scale)
+    local worldPos = self:GetWeaponMuzzleWorldPos()
+    local ang      = self:GetAngles()
+    local ed = EffectData() ed:SetOrigin(worldPos) ed:SetAngles(ang) ed:SetScale(scale or 1)
+    util.Effect(effectName, ed, true, true)
+    for _ = 1, 2 do
+        local sp = EffectData()
+        sp:SetOrigin(worldPos + Vector(math.Rand(-4,4), math.Rand(-4,4), 0))
+        sp:SetNormal(ang:Up()) sp:SetScale(scale or 1) sp:SetMagnitude(scale or 1) sp:SetRadius(8 * (scale or 1))
+        util.Effect("ManhackSparks", sp, true, true)
+    end
+end
+
+-- ============================================================
+-- GAU FIRE  --  uses ent_bombin_gau_bullet (ka52 pattern)
+-- ============================================================
+
 function ENT:FireGAUBulletAt(muzzlePos, impactPos, bulletIndex)
     local dir = impactPos - muzzlePos
     if dir:LengthSqr() < 1 then return end
     dir:Normalize()
+
     local bullet = ents.Create("ent_bombin_gau_bullet")
     if not IsValid(bullet) then return end
     bullet:SetPos(muzzlePos)
     bullet:SetAngles(dir:Angle())
-    bullet.Firer       = self
-    bullet.MuzzlePos   = muzzlePos
+    bullet.Firer      = self
+    bullet.MuzzlePos  = muzzlePos
     bullet.BulletIndex = bulletIndex or 1
     bullet.HEIInterval = self.GAU_HEI_Interval
     bullet.BulletRad   = self.GAU_BlastRadius
@@ -480,8 +441,8 @@ function ENT:StartGAUBurst()
     self.GAU_SweepStartPos = targetPos - sweepDir * self.GAU_SweepHalfLength
     self.GAU_SweepEndPos   = targetPos + sweepDir * self.GAU_SweepHalfLength
     table.insert(self.GAU_ActiveBursts, { bulletsFired = 0, nextTime = CurTime() })
-    local muzzlePos = self:GetWeaponMuzzleWorldPos()
-    self:FireGAUFlashAndSound(muzzlePos, 1)
+    self:SpawnWeaponMuzzleFX("cball_explode", 1)
+    sound.Play(table.Random(GAU_BRRT_SOUNDS), self.CenterPos, 110, math.random(96, 104), 1.0)
 end
 
 function ENT:UpdateActiveGAUBursts(ct)
@@ -557,9 +518,8 @@ function ENT:Update40mm(ct)
             if IsValid(phys) then phys:SetVelocity(dir * 1600) end
         end
     end
-    local ed = EffectData() ed:SetOrigin(muzzlePos) ed:SetAngles(self:GetAngles()) ed:SetScale(2)
-    util.Effect("cball_explode", ed, true, true)
-    self:EmitPlaneSound("killstreak_rewards/ac-130_40mm_fire.wav", muzzlePos, SND_LEVEL_WEAPONS, math.random(96, 104), 1.0, 0)
+    self:SpawnWeaponMuzzleFX("cball_explode", 2)
+    sound.Play("killstreak_rewards/ac-130_40mm_fire.wav", self.CenterPos, 110, math.random(96, 104), 1.0)
 end
 
 function ENT:Spawn105mmEffects(pos)
@@ -613,74 +573,42 @@ function ENT:Update105mm(ct)
             if IsValid(phys) then phys:SetVelocity(dir * 1800) end
         end
     end
-    local ed = EffectData() ed:SetOrigin(muzzlePos) ed:SetAngles(self:GetAngles()) ed:SetScale(3)
-    util.Effect("cball_explode", ed, true, true)
-    self:EmitPlaneSound("killstreak_rewards/ac-130_105mm_fire.wav", muzzlePos, SND_LEVEL_WEAPONS, math.random(96, 104), 1.0, 0)
+    self:SpawnWeaponMuzzleFX("cball_explode", 3)
+    sound.Play("killstreak_rewards/ac-130_105mm_fire.wav", self.CenterPos, 110, math.random(96, 104), 1.0)
 end
 
--- ============================================================
---  JASSM DEPLOYMENT
---  Spawns ent_bombin_jassm_owned (the AC-130's own missile entity)
---  directly at the plane's tail.  No orbit-entry math here.
--- ============================================================
 function ENT:UpdateJASSM(ct)
     if self.JASSM_Fired then return end
     self.JASSM_Fired = true
-
-    if not scripted_ents.GetStored("ent_bombin_jassm_owned") then
-        self:Debug("JASSM: ent_bombin_jassm_owned not registered, skipping")
-        return
-    end
-
-    -- Compute the plane's tail position in world space.
-    local planePos = self:GetPos()
-    local planeFwd = self:GetForward()
-    planeFwd.z = 0
-    if planeFwd:LengthSqr() < 0.01 then planeFwd = Vector(1, 0, 0) end
-    planeFwd:Normalize()
-
-    local tailXY = planePos + (-planeFwd) * PLANE_TAIL_BACK
-
-    -- Each successive JASSM spawns at a lower orbit altitude so they
-    -- don't collide during freefall.  Cap so we never go underground.
+    if not scripted_ents.GetStored("ent_bombin_jassm") then self:Debug("JASSM: ent_bombin_jassm not registered, skipping") return end
+    local planePos  = self:GetPos()
+    local backward  = -self:GetForward()
+    backward.z      = 0
+    if backward:LengthSqr() < 0.01 then backward = Vector(-1,0,0) end
+    backward:Normalize()
     self.JASSM_DeployCount = (self.JASSM_DeployCount or 0) + 1
-    local groundZ  = self.sky - self.SkyHeightAdd
-    local orbitAlt = self.sky - (self.JASSM_DeployCount * self.JASSM_AltOffset)
-    orbitAlt       = math.max(orbitAlt, groundZ + 800)
-
-    -- Spawn Z = plane's live Z + freefall drop.
-    -- The missile begins above the plane and falls down into orbit.
-    local spawnZ   = planePos.z + JASSM_FREEFALL_DROP
-    local spawnPos = Vector(tailXY.x, tailXY.y, spawnZ)
-    if not util.IsInWorld(spawnPos) then
-        spawnPos = Vector(self.CenterPos.x, self.CenterPos.y, spawnZ)
-    end
-
-    local jassm = ents.Create("ent_bombin_jassm_owned")
+    local jassmAlt = self.sky - (self.JASSM_DeployCount * self.JASSM_AltOffset)
+    local spawnPos = Vector(
+        planePos.x + backward.x * self.OrbitRadius * 1.2,
+        planePos.y + backward.y * self.OrbitRadius * 1.2,
+        jassmAlt
+    )
+    if not util.IsInWorld(spawnPos) then spawnPos = Vector(self.CenterPos.x, self.CenterPos.y, jassmAlt) end
+    local callDir = self:GetForward()
+    callDir.z     = 0
+    if callDir:LengthSqr() < 0.01 then callDir = Vector(1,0,0) end
+    callDir:Normalize()
+    local jassm = ents.Create("ent_bombin_jassm")
     if not IsValid(jassm) then self:Debug("JASSM: ents.Create failed") return end
-
-    -- Place at the tail BEFORE Spawn() so Initialize() reads self:GetPos()
-    -- as the tail position when SpawnedFromPlane is true.
-    jassm:SetPos(spawnPos)
-    jassm:SetAngles(planeFwd:Angle())
-
-    -- Pass context as plain fields; Initialize() reads these as self.X.
-    jassm.CenterPos       = self.CenterPos
-    jassm.CallDir         = planeFwd
-    jassm.Lifetime        = math.min(self.Lifetime, 35)
-    jassm.Speed           = 250
-    jassm.OrbitRadius     = self.OrbitRadius * 0.75
-    jassm.SkyHeightAdd    = math.max(orbitAlt - groundZ, 800)
-    -- Flag: skip orbit-entry spawn math and use self:GetPos() directly.
-    jassm.SpawnedFromPlane = true
-
-    jassm:Spawn()
-    jassm:Activate()
-
-    self:Debug(string.format(
-        "JASSM_owned deployed from tail %s (orbitAlt=%.0f spawnZ=%.0f)",
-        tostring(spawnPos), orbitAlt, spawnZ
-    ))
+    jassm:SetPos(spawnPos) jassm:SetAngles(callDir:Angle())
+    jassm:SetVar("CenterPos",    self.CenterPos)
+    jassm:SetVar("CallDir",      callDir)
+    jassm:SetVar("Lifetime",     math.min(self.Lifetime, 35))
+    jassm:SetVar("Speed",        250)
+    jassm:SetVar("OrbitRadius",  self.OrbitRadius * 0.75)
+    jassm:SetVar("SkyHeightAdd", math.max(jassmAlt - (self.sky - self.SkyHeightAdd), 800))
+    jassm:Spawn() jassm:Activate()
+    self:Debug("JASSM deployed from rear at " .. tostring(spawnPos) .. " alt=" .. tostring(jassmAlt))
 end
 
 function ENT:FindGround(centerPos)
