@@ -3,7 +3,7 @@ include("shared.lua")
 local mat_beam = Material("effects/laser1")
 local mat_glow = Material("sprites/light_glow02_add")
 
-local MUZZLE_VEL = 76000
+local MUZZLE_VEL = 66000
 local MAX_DIST   = 50000
 local MIN_SPEED  = 200
 

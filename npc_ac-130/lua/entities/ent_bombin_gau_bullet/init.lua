@@ -5,9 +5,9 @@ include("shared.lua")
 local BULLET_MODEL  = "models/weapons/bt_762.mdl"
 local BLAST_RADIUS  = 80
 local BLAST_DAMAGE  = 40
-local HEI_INTERVAL  = 90
+local HEI_INTERVAL  = 900
 local GAU_CAL_ID    = 3
-local MUZZLE_VEL    = 76000
+local MUZZLE_VEL    = 66000
 local MAX_DIST      = 50000
 local MIN_SPEED     = 200
 local FORCE_MUL     = 5.0
