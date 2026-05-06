@@ -6,21 +6,13 @@ local function HasGred()
     return gred and gred.CreateBullet and gred.CreateShell
 end
 
--- Real speed of sound in GMod units (343 m/s, 1 unit = 1 cm => 34300 u/s).
--- GAU_SOUND_SPEED is intentionally reduced for exaggerated gameplay feel:
--- at 6000 units altitude, the brrt arrives ~0.75s after the flash instead of 0.17s.
 local SOUND_SPEED_UNITS = 34300
-local GAU_SOUND_SPEED   = 8000  -- exaggerated: ~1/4 real speed, big delay at altitude
+local GAU_SOUND_SPEED   = 8000
 
--- Sound levels (Source engine dB scale):
---   75  = heard ~500u   (footsteps)
---   110 = heard ~2000u  (gunshots)
---   160 = heard across the full map (~16000u+)
--- Weapon fire at 6000+ unit altitude MUST use 160 to reach ground-level players.
-local SND_LEVEL_AMBIENT  = 90   -- idle/ambient loops on the plane entity
-local SND_LEVEL_WEAPONS  = 160  -- all weapon fire (GAU, 40mm, 105mm)
-local SND_LEVEL_PASS     = 155  -- random flyover pass sounds
-local SND_LEVEL_DESTRUCT = 160  -- destruction explosion
+local SND_LEVEL_AMBIENT  = 90
+local SND_LEVEL_WEAPONS  = 160
+local SND_LEVEL_PASS     = 155
+local SND_LEVEL_DESTRUCT = 160
 
 local PRECALC_SOUNDS = {
     "killstreak_rewards/ac-130_105mm_fire.wav",
@@ -44,9 +36,7 @@ local PRECALC_SOUNDS = {
     "ac/ac -130B.wav",
 }
 
-for _, s in ipairs(PRECALC_SOUNDS) do
-    util.PrecacheSound(s)
-end
+for _, s in ipairs(PRECALC_SOUNDS) do util.PrecacheSound(s) end
 
 local PASS_SOUNDS = {
     "killstreak_rewards/ac-130_105mm_fire.wav",
@@ -61,12 +51,8 @@ local GAU_BRRT_SOUNDS = {
     "gunsounds/brrt_04.wav",
 }
 
-local GAU_CAL_ID = 3
-
 util.AddNetworkString("bombin_plane_damage_tier")
 util.AddNetworkString("bombin_plane_sound")
--- Flash event: carries muzzle world pos + scale so the client renders it
--- immediately (no delay), while the sound arrives later via bombin_plane_sound.
 util.AddNetworkString("bombin_gau_muzzle_flash")
 
 function ENT:Debug(msg)
@@ -88,10 +74,8 @@ ENT.GAU_RadiusMul       = 0.05
 ENT.GAU_SweepHalfLength = 600
 ENT.GAU_JitterAmount    = 200
 ENT.GAU_SpraySoundDelay = 1.3
-
 ENT.GAU_TargetOffsetMin = 300
 ENT.GAU_TargetOffsetMax = 900
-
 ENT.GAU_HEI_Interval    = 90
 ENT.GAU_BulletDamage    = 40
 ENT.GAU_BlastRadius     = 80
@@ -104,22 +88,23 @@ ENT.GUN40_Damage         = 300
 ENT.GUN105_Damage        = 3700
 ENT.GUN40_TNT            = 0.5
 ENT.GUN105_TNT           = 2.5
-
 ENT.GUN40_Scatter        = 600
 ENT.GUN105_Scatter       = 400
-
 ENT.GAU_Spray_Delay      = 0.033
 
 ENT.MuzzleForwardOffset  = 250
 ENT.MuzzleSideOffset     = -60
 ENT.Plane_Ambient_SoundPath = "ac/ac -130B.wav"
 
-ENT.JASSM_AltOffset = 1500
-
--- How far behind the model origin the tail sits (tune to match the mdl).
--- air_130_l.mdl nose-to-tail is roughly 840u; tail socket is ~420u behind origin.
+-- How far behind the model origin the tail sits.
+-- air_130_l.mdl: nose-to-tail ~840u, tail is ~420u behind origin.
 local PLANE_TAIL_BACK = 420
 
+-- JASSM freefall start is this many units ABOVE orbit altitude.
+-- Must match FREEFALL_DROP in ent_bombin_jassm/init.lua.
+local JASSM_FREEFALL_DROP = 900
+
+ENT.JASSM_AltOffset = 1500
 ENT.MaxHP = 8000
 ENT.DamageTierThresholds = { 0.75, 0.50, 0.25 }
 
@@ -129,11 +114,6 @@ ENT.MuzzlePoints = {
     Vector(-300,-250, 50),
 }
 
--- ============================================================
--- SOUND BROADCAST HELPER
--- Clients compute their own travel delay: dist / SOUND_SPEED_UNITS.
--- extraDelay: optional additional fixed delay on top.
--- ============================================================
 function ENT:EmitPlaneSound(path, pos, level, pitch, volume, extraDelay)
     if not path then return end
     net.Start("bombin_plane_sound")
@@ -146,13 +126,6 @@ function ENT:EmitPlaneSound(path, pos, level, pitch, volume, extraDelay)
     net.Broadcast()
 end
 
--- ============================================================
--- GAU MUZZLE FLASH BROADCAST
--- Flash is sent separately from sound so the client can:
---   1. Draw the flash IMMEDIATELY (no delay - light travels instantly).
---   2. Play the brrt sound AFTER a travel delay via bombin_plane_sound.
--- soundSpeed: the (exaggerated) speed constant clients use to delay the brrt.
--- ============================================================
 function ENT:BroadcastGAUFlash(muzzlePos, scale, soundPath, soundSpeed)
     net.Start("bombin_gau_muzzle_flash")
         net.WriteVector(muzzlePos)
@@ -163,12 +136,13 @@ function ENT:BroadcastGAUFlash(muzzlePos, scale, soundPath, soundSpeed)
 end
 
 function ENT:Initialize()
-    self.CenterPos    = self:GetVar("CenterPos", self:GetPos())
-    self.CallDir      = self:GetVar("CallDir", Vector(1, 0, 0))
-    self.Lifetime     = self:GetVar("Lifetime", 40)
-    self.Speed        = self:GetVar("Speed", 300)
-    self.OrbitRadius  = self:GetVar("OrbitRadius", 3000)
-    self.SkyHeightAdd = self:GetVar("SkyHeightAdd", 6000)
+    -- Prefer fields pre-set by the spawner; fall back to defaults.
+    self.CenterPos    = self.CenterPos    or self:GetPos()
+    self.CallDir      = self.CallDir      or Vector(1, 0, 0)
+    self.Lifetime     = self.Lifetime     or 40
+    self.Speed        = self.Speed        or 300
+    self.OrbitRadius  = self.OrbitRadius  or 3000
+    self.SkyHeightAdd = self.SkyHeightAdd or 6000
 
     self.MaxHP = self.MaxHP or ENT.MaxHP or 8000
 
@@ -189,7 +163,7 @@ function ENT:Initialize()
     if not util.IsInWorld(spawnPos) then
         spawnPos = Vector(self.CenterPos.x, self.CenterPos.y, self.sky)
     end
-    if not util.IsInWorld(spawnPos) then self:Debug("Fallback spawnPos out of world too") self:Remove() return end
+    if not util.IsInWorld(spawnPos) then self:Debug("Fallback spawnPos OOW") self:Remove() return end
 
     self:SetModel("models/military2/air/air_130_l.mdl")
     self:PhysicsInit(SOLID_VPHYSICS)
@@ -224,8 +198,6 @@ function ENT:Initialize()
         self.PhysObj:EnableGravity(false)
     end
 
-    -- Ambient loops: raised to SND_LEVEL_AMBIENT (90) so they're audible
-    -- from the ground without dominating over weapon fire.
     self.IdleLoop = CreateSound(self, "ac-130_kill_sounds/AC130_idle_inside.mp3")
     if self.IdleLoop then
         self.IdleLoop:SetSoundLevel(SND_LEVEL_AMBIENT)
@@ -239,7 +211,6 @@ function ENT:Initialize()
     end
 
     self.NextSpraySoundTime = 0
-    -- Pass sound on spawn: full weapon-level volume so players hear the arrival.
     self:EmitPlaneSound(table.Random(PASS_SOUNDS), spawnPos, SND_LEVEL_PASS, 100, 1.0, 0)
     self:Debug("Spawned at " .. tostring(spawnPos))
 
@@ -420,12 +391,6 @@ end
 function ENT:StartSprayLoop() self.NextSpraySoundTime = CurTime() end
 function ENT:StopSprayLoop()  self.NextSpraySoundTime = 0 end
 
--- ============================================================
--- GAU MUZZLE FX  (server side)
--- Flash is broadcast immediately via bombin_gau_muzzle_flash.
--- Sound is broadcast via bombin_plane_sound (each client adds its own
--- travel delay from the flash position).
--- ============================================================
 function ENT:FireGAUFlashAndSound(muzzlePos, scale)
     local snd = table.Random(GAU_BRRT_SOUNDS)
     self:BroadcastGAUFlash(muzzlePos, scale or 1, snd, GAU_SOUND_SPEED)
@@ -482,7 +447,6 @@ function ENT:FireGAUBulletAt(muzzlePos, impactPos, bulletIndex)
     local dir = impactPos - muzzlePos
     if dir:LengthSqr() < 1 then return end
     dir:Normalize()
-
     local bullet = ents.Create("ent_bombin_gau_bullet")
     if not IsValid(bullet) then return end
     bullet:SetPos(muzzlePos)
@@ -595,7 +559,6 @@ function ENT:Update40mm(ct)
     end
     local ed = EffectData() ed:SetOrigin(muzzlePos) ed:SetAngles(self:GetAngles()) ed:SetScale(2)
     util.Effect("cball_explode", ed, true, true)
-    -- 40mm: level 160 so it's heard from the ground at full altitude
     self:EmitPlaneSound("killstreak_rewards/ac-130_40mm_fire.wav", muzzlePos, SND_LEVEL_WEAPONS, math.random(96, 104), 1.0, 0)
 end
 
@@ -652,10 +615,17 @@ function ENT:Update105mm(ct)
     end
     local ed = EffectData() ed:SetOrigin(muzzlePos) ed:SetAngles(self:GetAngles()) ed:SetScale(3)
     util.Effect("cball_explode", ed, true, true)
-    -- 105mm: level 160 so it's heard from the ground at full altitude
     self:EmitPlaneSound("killstreak_rewards/ac-130_105mm_fire.wav", muzzlePos, SND_LEVEL_WEAPONS, math.random(96, 104), 1.0, 0)
 end
 
+-- ============================================================
+--  JASSM DEPLOYMENT
+--  The missile+chute combo spawns DIRECTLY AT THE PLANE'S TAIL.
+--  No orbit-entry math.  Parameters are written as direct Lua
+--  fields on the entity object BEFORE Spawn()/Activate() so
+--  Initialize() can read them as self.X without any GetVar/SetVar
+--  (which does not survive the Spawn call in GLua scripted_ents).
+-- ============================================================
 function ENT:UpdateJASSM(ct)
     if self.JASSM_Fired then return end
     self.JASSM_Fired = true
@@ -665,61 +635,61 @@ function ENT:UpdateJASSM(ct)
         return
     end
 
-    -- ----------------------------------------------------------------
-    -- Compute the AC-130's tail position in world space.
-    -- The plane's forward vector points toward its nose, so the tail
-    -- is directly behind the origin by PLANE_TAIL_BACK units.
-    -- We keep the Z from the live altitude (self.sky / jitter already
-    -- applied via self:GetPos()) so the JASSM spawns at exactly the
-    -- same altitude the plane is flying at right now.
-    -- ----------------------------------------------------------------
-    local planePos  = self:GetPos()
-    local planeFwd  = self:GetForward()
-    planeFwd.z      = 0
-    if planeFwd:LengthSqr() < 0.01 then planeFwd = Vector(1, 0, 0) end
+    -- ---- Tail position ----
+    -- The plane's forward vector points at the nose; tail is directly behind.
+    local planePos = self:GetPos()                        -- live position including jitter
+    local planeFwd = self:GetForward()
+    planeFwd.z = 0
+    if planeFwd:LengthSqr() < 0.01 then planeFwd = Vector(1,0,0) end
     planeFwd:Normalize()
 
-    local tailPos = planePos + (-planeFwd) * PLANE_TAIL_BACK
-    -- Keep the same Z as the plane's current live altitude.
-    tailPos.z = planePos.z
+    local tailXY = planePos + (-planeFwd) * PLANE_TAIL_BACK
 
+    -- ---- Altitude ----
+    -- Each successive JASSM spawns 1500u lower than the previous so they
+    -- don't collide during freefall. Cap so we never go underground.
     self.JASSM_DeployCount = (self.JASSM_DeployCount or 0) + 1
-    local jassmAlt = self.sky - (self.JASSM_DeployCount * self.JASSM_AltOffset)
-    -- Clamp so we never go underground (fix for uncapped DeployCount).
-    local groundZ  = self.sky - self.SkyHeightAdd
-    jassmAlt       = math.max(jassmAlt, groundZ + 800)
+    local groundZ   = self.sky - self.SkyHeightAdd
+    local orbitAlt  = self.sky - (self.JASSM_DeployCount * self.JASSM_AltOffset)
+    orbitAlt        = math.max(orbitAlt, groundZ + 800)
 
-    -- The JASSM freefall spawn is FREEFALL_DROP (900u) ABOVE its orbit
-    -- altitude, so add that on top of jassmAlt here.
-    local spawnZ = jassmAlt + 900  -- mirrors FREEFALL_DROP in jassm/init.lua
-
-    local spawnPos = Vector(tailPos.x, tailPos.y, spawnZ)
+    -- Spawn Z = orbit altitude + freefall drop so the missile begins
+    -- ABOVE orbit altitude and falls DOWN into orbit, matching the
+    -- freefall->ignition logic in ent_bombin_jassm/init.lua.
+    local spawnZ   = planePos.z + JASSM_FREEFALL_DROP   -- drop is relative to plane's live Z
+    local spawnPos = Vector(tailXY.x, tailXY.y, spawnZ)
     if not util.IsInWorld(spawnPos) then
         spawnPos = Vector(self.CenterPos.x, self.CenterPos.y, spawnZ)
     end
 
-    local callDir = planeFwd
-
+    -- ---- Create the entity and set ALL parameters as plain fields ----
+    -- Fields are set BEFORE Spawn()/Activate() so Initialize() reads them
+    -- directly as self.X.  SetVar/GetVar is intentionally NOT used here.
     local jassm = ents.Create("ent_bombin_jassm")
     if not IsValid(jassm) then self:Debug("JASSM: ents.Create failed") return end
 
+    -- Position the entity at the tail right now.
     jassm:SetPos(spawnPos)
-    jassm:SetAngles(callDir:Angle())
-    jassm:SetVar("CenterPos",    self.CenterPos)
-    jassm:SetVar("CallDir",      callDir)
-    jassm:SetVar("Lifetime",     math.min(self.Lifetime, 35))
-    jassm:SetVar("Speed",        250)
-    jassm:SetVar("OrbitRadius",  self.OrbitRadius * 0.75)
-    jassm:SetVar("SkyHeightAdd", math.max(jassmAlt - groundZ, 800))
-    -- Tell the JASSM to use the tail position as its freefall spawn origin.
-    -- The JASSM's Initialize() checks for this var and skips its own
-    -- orbit-entry position calculation when it is set.
-    jassm:SetVar("PlaneTailPos",  spawnPos)
+    jassm:SetAngles(planeFwd:Angle())
+
+    -- Plane context.
+    jassm.CenterPos    = self.CenterPos
+    jassm.CallDir      = planeFwd
+    jassm.Lifetime     = math.min(self.Lifetime, 35)
+    jassm.Speed        = 250
+    jassm.OrbitRadius  = self.OrbitRadius * 0.75
+    -- SkyHeightAdd for the JASSM is measured from ground to its orbit alt.
+    jassm.SkyHeightAdd = math.max(orbitAlt - groundZ, 800)
+    -- Tell Initialize() to skip position computation and use self:GetPos().
+    jassm.SpawnedFromPlane = true
 
     jassm:Spawn()
     jassm:Activate()
 
-    self:Debug("JASSM deployed from plane tail at " .. tostring(spawnPos))
+    self:Debug(string.format(
+        "JASSM deployed from tail %s (orbitAlt=%.0f, spawnZ=%.0f)",
+        tostring(spawnPos), orbitAlt, spawnZ
+    ))
 end
 
 function ENT:FindGround(centerPos)
