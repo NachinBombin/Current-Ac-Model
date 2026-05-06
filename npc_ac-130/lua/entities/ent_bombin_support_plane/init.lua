@@ -116,6 +116,10 @@ ENT.Plane_Ambient_SoundPath = "ac/ac -130B.wav"
 
 ENT.JASSM_AltOffset = 1500
 
+-- How far behind the model origin the tail sits (tune to match the mdl).
+-- air_130_l.mdl nose-to-tail is roughly 840u; tail socket is ~420u behind origin.
+local PLANE_TAIL_BACK = 420
+
 ENT.MaxHP = 8000
 ENT.DamageTierThresholds = { 0.75, 0.50, 0.25 }
 
@@ -655,35 +659,67 @@ end
 function ENT:UpdateJASSM(ct)
     if self.JASSM_Fired then return end
     self.JASSM_Fired = true
-    if not scripted_ents.GetStored("ent_bombin_jassm") then self:Debug("JASSM: ent_bombin_jassm not registered, skipping") return end
+
+    if not scripted_ents.GetStored("ent_bombin_jassm") then
+        self:Debug("JASSM: ent_bombin_jassm not registered, skipping")
+        return
+    end
+
+    -- ----------------------------------------------------------------
+    -- Compute the AC-130's tail position in world space.
+    -- The plane's forward vector points toward its nose, so the tail
+    -- is directly behind the origin by PLANE_TAIL_BACK units.
+    -- We keep the Z from the live altitude (self.sky / jitter already
+    -- applied via self:GetPos()) so the JASSM spawns at exactly the
+    -- same altitude the plane is flying at right now.
+    -- ----------------------------------------------------------------
     local planePos  = self:GetPos()
-    local backward  = -self:GetForward()
-    backward.z      = 0
-    if backward:LengthSqr() < 0.01 then backward = Vector(-1,0,0) end
-    backward:Normalize()
+    local planeFwd  = self:GetForward()
+    planeFwd.z      = 0
+    if planeFwd:LengthSqr() < 0.01 then planeFwd = Vector(1, 0, 0) end
+    planeFwd:Normalize()
+
+    local tailPos = planePos + (-planeFwd) * PLANE_TAIL_BACK
+    -- Keep the same Z as the plane's current live altitude.
+    tailPos.z = planePos.z
+
     self.JASSM_DeployCount = (self.JASSM_DeployCount or 0) + 1
     local jassmAlt = self.sky - (self.JASSM_DeployCount * self.JASSM_AltOffset)
-    local spawnPos = Vector(
-        planePos.x + backward.x * self.OrbitRadius * 1.2,
-        planePos.y + backward.y * self.OrbitRadius * 1.2,
-        jassmAlt
-    )
-    if not util.IsInWorld(spawnPos) then spawnPos = Vector(self.CenterPos.x, self.CenterPos.y, jassmAlt) end
-    local callDir = self:GetForward()
-    callDir.z     = 0
-    if callDir:LengthSqr() < 0.01 then callDir = Vector(1,0,0) end
-    callDir:Normalize()
+    -- Clamp so we never go underground (fix for uncapped DeployCount).
+    local groundZ  = self.sky - self.SkyHeightAdd
+    jassmAlt       = math.max(jassmAlt, groundZ + 800)
+
+    -- The JASSM freefall spawn is FREEFALL_DROP (900u) ABOVE its orbit
+    -- altitude, so add that on top of jassmAlt here.
+    local spawnZ = jassmAlt + 900  -- mirrors FREEFALL_DROP in jassm/init.lua
+
+    local spawnPos = Vector(tailPos.x, tailPos.y, spawnZ)
+    if not util.IsInWorld(spawnPos) then
+        spawnPos = Vector(self.CenterPos.x, self.CenterPos.y, spawnZ)
+    end
+
+    local callDir = planeFwd
+
     local jassm = ents.Create("ent_bombin_jassm")
     if not IsValid(jassm) then self:Debug("JASSM: ents.Create failed") return end
-    jassm:SetPos(spawnPos) jassm:SetAngles(callDir:Angle())
+
+    jassm:SetPos(spawnPos)
+    jassm:SetAngles(callDir:Angle())
     jassm:SetVar("CenterPos",    self.CenterPos)
     jassm:SetVar("CallDir",      callDir)
     jassm:SetVar("Lifetime",     math.min(self.Lifetime, 35))
     jassm:SetVar("Speed",        250)
     jassm:SetVar("OrbitRadius",  self.OrbitRadius * 0.75)
-    jassm:SetVar("SkyHeightAdd", math.max(jassmAlt - (self.sky - self.SkyHeightAdd), 800))
-    jassm:Spawn() jassm:Activate()
-    self:Debug("JASSM deployed from rear at " .. tostring(spawnPos) .. " alt=" .. tostring(jassmAlt))
+    jassm:SetVar("SkyHeightAdd", math.max(jassmAlt - groundZ, 800))
+    -- Tell the JASSM to use the tail position as its freefall spawn origin.
+    -- The JASSM's Initialize() checks for this var and skips its own
+    -- orbit-entry position calculation when it is set.
+    jassm:SetVar("PlaneTailPos",  spawnPos)
+
+    jassm:Spawn()
+    jassm:Activate()
+
+    self:Debug("JASSM deployed from plane tail at " .. tostring(spawnPos))
 end
 
 function ENT:FindGround(centerPos)
