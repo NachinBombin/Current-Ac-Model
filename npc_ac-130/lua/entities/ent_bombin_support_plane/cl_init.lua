@@ -32,45 +32,6 @@ net.Receive("bombin_105mm_direct_sound", function()
 end)
 
 -- ============================================================
--- AMBIENT ENGINE LOOP
---
--- OnEntityCreated is a SHARED hook. Without CLIENT guard it also
--- fires on the server, where CreateSound does nothing audible.
--- The if CLIENT then block ensures this only runs in the client realm.
---
--- timer.Simple(0) defers one frame so NWVars have propagated
--- before we read AmbientLoopActive.
--- ============================================================
-local AmbientLoops = {}  -- [entIndex] = CSoundPatch
-
-if CLIENT then
-    hook.Add("OnEntityCreated", "bombin_plane_ambient_loop", function(ent)
-        if not IsValid(ent) then return end
-        if ent:GetClass() ~= "ent_bombin_support_plane" then return end
-        timer.Simple(0, function()
-            if not IsValid(ent) then return end
-            if not ent:GetNWBool("AmbientLoopActive", false) then return end
-            local idx = ent:EntIndex()
-            if AmbientLoops[idx] then return end
-            local snd = CreateSound(ent, ent.Plane_Ambient_SoundPath)
-            if snd then
-                snd:SetSoundLevel(80)
-                snd:Play()
-                AmbientLoops[idx] = snd
-            end
-        end)
-    end)
-end
-
-function ENT:OnRemove()
-    local snd = AmbientLoops[self:EntIndex()]
-    if snd then
-        snd:Stop()
-        AmbientLoops[self:EntIndex()] = nil
-    end
-end
-
--- ============================================================
 -- DAMAGE TIERS
 -- ============================================================
 
@@ -151,7 +112,7 @@ end
 
 local function StopParticles(state)
     if not state.particles then return end
-    for _, p in ipairs(state.particles) do
+    for _, p in ipairs(state.particles ) do
         if IsValid(p) then p:StopEmission() end
     end
     state.particles = {}

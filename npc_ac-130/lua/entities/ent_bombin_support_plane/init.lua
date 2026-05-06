@@ -33,7 +33,7 @@ local SOUND_105_IMPACT = "killstreak_explosions/105_explosion.wav"
 
 util.AddNetworkString("bombin_plane_damage_tier")
 util.AddNetworkString("bombin_plane_spatial_sound")
-util.AddNetworkString("bombin_105mm_direct_sound")  -- instant broadcast, no delay queue
+util.AddNetworkString("bombin_105mm_direct_sound")
 
 local SOUND_SPEED     = 8200
 local MAX_HEAR_DIST   = 88000
@@ -110,14 +110,6 @@ end
 
 -- ============================================================
 -- 105mm SHELL IMPACT TRACKING
---
--- Impact sounds must be IMMEDIATE — the blast visual fires the
--- same frame. We bypass EmitSpatialSound (which queues via
--- FlushPendingSounds in Think) and instead send a direct
--- net.Broadcast so every client hears it this tick.
---
--- EntityRemoved fires server-side the frame before the entity
--- is deleted; shell:GetPos() at that point == blast position.
 -- ============================================================
 local Shells105 = {}
 
@@ -127,7 +119,6 @@ hook.Add("EntityRemoved", "bombin_105mm_shell_sound", function(ent)
     if not data then return end
     local pos = ent:GetPos()
     Shells105[ent:EntIndex()] = nil
-    -- Direct broadcast: no delay queue, fires this server tick
     net.Start("bombin_105mm_direct_sound")
         net.WriteVector( pos )
         net.WriteUInt  ( WEAPON_LEVEL, 8 )
@@ -232,7 +223,6 @@ function ENT:Initialize()
 
     self:SetNWInt("HP",    self.MaxHP)
     self:SetNWInt("MaxHP", self.MaxHP)
-    self:SetNWBool("AmbientLoopActive", true)
 
     local ang = self.CallDir:Angle()
     self:SetAngles(Angle(0, ang.y - 90, 0))
@@ -256,8 +246,17 @@ function ENT:Initialize()
         self.PhysObj:EnableGravity(false)
     end
 
+    -- Ambient engine loop — same pattern as ent_bombin_support_heli.
+    -- CreateSound on a server entity is automatically 3D-positioned
+    -- for all clients by the Source engine. No net messages needed.
     self.IdleLoop = CreateSound(self, "ac-130_kill_sounds/AC130_idle_inside.mp3")
     if self.IdleLoop then self.IdleLoop:SetSoundLevel(60) self.IdleLoop:Play() end
+
+    self.PlaneAmbientLoop = CreateSound(self, self.Plane_Ambient_SoundPath)
+    if self.PlaneAmbientLoop then
+        self.PlaneAmbientLoop:SetSoundLevel(80)
+        self.PlaneAmbientLoop:Play()
+    end
 
     self:Debug("Spawned at " .. tostring(spawnPos))
 
@@ -318,9 +317,9 @@ end
 function ENT:DestroyPlane()
     if self.IsDestroyed then return end
     self.IsDestroyed = true
-    if self.IdleLoop then self.IdleLoop:Stop() end
+    if self.IdleLoop         then self.IdleLoop:Stop()         self.IdleLoop         = nil end
+    if self.PlaneAmbientLoop then self.PlaneAmbientLoop:Stop() self.PlaneAmbientLoop = nil end
     self:StopSprayLoop()
-    self:SetNWBool("AmbientLoopActive", false)
     self:BroadcastDamageTier(0)
     local pos = self.LastPos or self:GetPos()
     local ed1 = EffectData() ed1:SetOrigin(pos) ed1:SetScale(6) ed1:SetMagnitude(6) ed1:SetRadius(600) util.Effect("HelicopterMegaBomb", ed1, true, true)
@@ -740,10 +739,10 @@ function ENT:FindGround(centerPos)
 end
 
 function ENT:OnRemove()
-    if self.IdleLoop then self.IdleLoop:Stop() end
+    if self.IdleLoop         then self.IdleLoop:Stop()         self.IdleLoop         = nil end
+    if self.PlaneAmbientLoop then self.PlaneAmbientLoop:Stop() self.PlaneAmbientLoop = nil end
     if not self.IsDestroyed then
         self:StopSprayLoop()
-        self:SetNWBool("AmbientLoopActive", false)
     end
     pending_sounds = {}
 end
