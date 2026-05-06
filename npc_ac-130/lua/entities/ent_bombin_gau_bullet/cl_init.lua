@@ -7,11 +7,29 @@ local MUZZLE_VEL = 85000
 local MAX_DIST   = 22000
 local MIN_SPEED  = 200
 
+-- Impact sounds also travel-delayed with the same exaggerated constant
+-- so the dirt kick and spark are seen before the crack.
+local GAU_SOUND_SPEED = 8000
+
+local IMPACT_SOUNDS = {
+    "physics/concrete/impact_bullet1.wav",
+    "physics/concrete/impact_bullet2.wav",
+    "physics/concrete/impact_bullet3.wav",
+    "physics/dirt/impact_bullet1.wav",
+    "physics/dirt/impact_bullet2.wav",
+    "physics/dirt/impact_bullet3.wav",
+    "physics/metal/metal_solid_impact_bullet1.wav",
+    "physics/metal/metal_solid_impact_bullet2.wav",
+    "physics/metal/metal_solid_impact_bullet3.wav",
+}
+
 bombin_gau_store = bombin_gau_store or {
     last_idx           = 0,
     buffer_size        = 128,
     buffer             = {},
     active_projectiles = {},
+    -- pending_impact_sounds: queue of { pos, time } waiting to play
+    pending_sounds     = {},
 }
 
 if #bombin_gau_store.buffer == 0 then
@@ -59,7 +77,8 @@ local tick_interval = engine.TickInterval()
 local last_tick     = engine.TickCount()
 
 local function move_cl()
-    local active = bombin_gau_store.active_projectiles
+    local store  = bombin_gau_store
+    local active = store.active_projectiles
     local count  = #active
     local idx    = 1
     while idx <= count do
@@ -71,11 +90,33 @@ local function move_cl()
         else
             local step    = proj.dir * (proj.speed * tick_interval)
             local new_pos = proj.pos + step
-            proj.old_vel  = proj.vel
-            proj.old_pos  = proj.pos
-            proj.vel      = step
-            proj.pos      = new_pos
-            proj.distance_traveled = proj.distance_traveled + step:Length()
+
+            -- Client-side impact detection for sound scheduling.
+            -- We trace and queue the impact sound with travel delay so the
+            -- dirt/spark FX (which play instantly via the server net effect)
+            -- are seen before the crack arrives.
+            local tr = util.TraceLine({
+                start  = proj.pos,
+                endpos = new_pos,
+                mask   = MASK_SHOT,
+            })
+
+            if tr.Hit and not tr.HitSky then
+                proj.hit = true
+                local hitPos   = tr.HitPos
+                local dist     = EyePos():Distance(hitPos)
+                local delay    = dist / GAU_SOUND_SPEED
+                local snd      = IMPACT_SOUNDS[math.random(#IMPACT_SOUNDS)]
+                local playAt   = UnPredictedCurTime() + delay
+                local ps       = store.pending_sounds
+                ps[#ps + 1]    = { snd = snd, pos = hitPos, playAt = playAt }
+            else
+                proj.old_vel  = proj.vel
+                proj.old_pos  = proj.pos
+                proj.vel      = step
+                proj.pos      = new_pos
+                proj.distance_traveled = proj.distance_traveled + step:Length()
+            end
             idx = idx + 1
         end
     end
@@ -86,6 +127,23 @@ hook.Add("CreateMove", "bombin_gau_move_cl", function()
     if t > last_tick then
         last_tick = t
         move_cl()
+    end
+end)
+
+-- Drain the pending sound queue each frame
+hook.Add("Think", "bombin_gau_impact_sounds", function()
+    local ps  = bombin_gau_store.pending_sounds
+    local now = UnPredictedCurTime()
+    local i   = 1
+    while i <= #ps do
+        local e = ps[i]
+        if now >= e.playAt then
+            sound.Play(e.snd, e.pos, 75, math.random(95, 105), 0.8)
+            ps[i] = ps[#ps]
+            ps[#ps] = nil
+        else
+            i = i + 1
+        end
     end
 end)
 

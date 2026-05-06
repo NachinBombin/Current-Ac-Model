@@ -6,7 +6,11 @@ local function HasGred()
     return gred and gred.CreateBullet and gred.CreateShell
 end
 
+-- Real speed of sound in GMod units (343 m/s, 1 unit = 1 cm => 34300 u/s).
+-- GAU_SOUND_SPEED is intentionally reduced for exaggerated gameplay feel:
+-- at 6000 units altitude, the brrt arrives ~1.4s after the flash instead of 0.17s.
 local SOUND_SPEED_UNITS = 34300
+local GAU_SOUND_SPEED   = 8000  -- exaggerated: ~1/4 real speed, big delay at altitude
 
 local PRECALC_SOUNDS = {
     "killstreak_rewards/ac-130_105mm_fire.wav",
@@ -40,18 +44,6 @@ local PASS_SOUNDS = {
     "killstreak_rewards/ac-130_25mm_fire.wav",
 }
 
-local GAU_IMPACT_SOUNDS = {
-    "physics/concrete/impact_bullet1.wav",
-    "physics/concrete/impact_bullet2.wav",
-    "physics/concrete/impact_bullet3.wav",
-    "physics/dirt/impact_bullet1.wav",
-    "physics/dirt/impact_bullet2.wav",
-    "physics/dirt/impact_bullet3.wav",
-    "physics/metal/metal_solid_impact_bullet1.wav",
-    "physics/metal/metal_solid_impact_bullet2.wav",
-    "physics/metal/metal_solid_impact_bullet3.wav",
-}
-
 local GAU_BRRT_SOUNDS = {
     "gunsounds/brrt_01.wav",
     "gunsounds/brrt_02.wav",
@@ -63,6 +55,9 @@ local GAU_CAL_ID = 3
 
 util.AddNetworkString("bombin_plane_damage_tier")
 util.AddNetworkString("bombin_plane_sound")
+-- Flash event: carries muzzle world pos + scale so the client renders it
+-- immediately (no delay), while the sound arrives later via bombin_plane_sound.
+util.AddNetworkString("bombin_gau_muzzle_flash")
 
 function ENT:Debug(msg)
     print("[Bombin Support Plane ENT] " .. msg)
@@ -107,7 +102,6 @@ ENT.GAU_Spray_Delay      = 0.033
 
 ENT.MuzzleForwardOffset  = 250
 ENT.MuzzleSideOffset     = -60
--- FIX: corrected path to match the actual file on disk (was "sounds/ac/ac-130B.wav", missing space)
 ENT.Plane_Ambient_SoundPath = "ac/ac -130B.wav"
 
 ENT.JASSM_AltOffset = 1500
@@ -123,10 +117,8 @@ ENT.MuzzlePoints = {
 
 -- ============================================================
 -- SOUND BROADCAST HELPER
--- Sends a sound event to all clients via net message.
--- Clients will calculate a per-player travel delay from
--- their own EyePos to the event position (speed = 34300 u/s).
--- extraDelay: optional additional server-side delay in seconds.
+-- Clients compute their own travel delay: dist / SOUND_SPEED_UNITS.
+-- extraDelay: optional additional fixed delay on top.
 -- ============================================================
 function ENT:EmitPlaneSound(path, pos, level, pitch, volume, extraDelay)
     if not path then return end
@@ -137,6 +129,22 @@ function ENT:EmitPlaneSound(path, pos, level, pitch, volume, extraDelay)
         net.WriteUInt(math.Clamp(pitch  or 100, 0, 255), 8)
         net.WriteFloat(math.max(0, volume or 1))
         net.WriteFloat(math.max(0, extraDelay or 0))
+    net.Broadcast()
+end
+
+-- ============================================================
+-- GAU MUZZLE FLASH BROADCAST
+-- Flash is sent separately from sound so the client can:
+--   1. Draw the flash IMMEDIATELY (no delay - light travels instantly).
+--   2. Play the brrt sound AFTER a travel delay via bombin_plane_sound.
+-- soundSpeed: the (exaggerated) speed constant clients use to delay the brrt.
+-- ============================================================
+function ENT:BroadcastGAUFlash(muzzlePos, scale, soundPath, soundSpeed)
+    net.Start("bombin_gau_muzzle_flash")
+        net.WriteVector(muzzlePos)
+        net.WriteFloat(scale or 1)
+        net.WriteString(soundPath or "")
+        net.WriteFloat(soundSpeed or GAU_SOUND_SPEED)
     net.Broadcast()
 end
 
@@ -202,7 +210,6 @@ function ENT:Initialize()
         self.PhysObj:EnableGravity(false)
     end
 
-    -- Server-side CreateSound loops: these are positional and update with the entity
     self.IdleLoop = CreateSound(self, "ac-130_kill_sounds/AC130_idle_inside.mp3")
     if self.IdleLoop then self.IdleLoop:SetSoundLevel(60) self.IdleLoop:Play() end
 
@@ -210,7 +217,6 @@ function ENT:Initialize()
     if self.PlaneAmbientLoop then self.PlaneAmbientLoop:SetSoundLevel(80) self.PlaneAmbientLoop:Play() end
 
     self.NextSpraySoundTime = 0
-    -- Initial pass sound: emits from actual spawn position
     self:EmitPlaneSound(table.Random(PASS_SOUNDS), spawnPos, 75, 100, 0.7, 0)
     self:Debug("Spawned at " .. tostring(spawnPos))
 
@@ -277,7 +283,6 @@ function ENT:DestroyPlane()
     local ed2 = EffectData() ed2:SetOrigin(pos) ed2:SetScale(5) ed2:SetMagnitude(5) ed2:SetRadius(500) util.Effect("500lb_air", ed2, true, true)
     local ed3 = EffectData() ed3:SetOrigin(pos + Vector(0,0,80)) ed3:SetScale(4) ed3:SetMagnitude(4) ed3:SetRadius(400) util.Effect("500lb_air", ed3, true, true)
     local ed4 = EffectData() ed4:SetOrigin(pos + Vector(0,0,180)) ed4:SetScale(3) ed4:SetMagnitude(3) ed4:SetRadius(300) util.Effect("500lb_air", ed4, true, true)
-    -- Destruction sounds: no travel delay, fire from plane's last known position
     self:EmitPlaneSound("ambient/explosions/explode_8.wav", pos, 140, 90,  1.0, 0)
     self:EmitPlaneSound("weapon_AWP.Single",               pos, 145, 60,  1.0, 0)
     util.BlastDamage(self, self, pos, 400, 200)
@@ -291,7 +296,6 @@ function ENT:Think()
     if not IsValid(self.PhysObj) then self.PhysObj = self:GetPhysicsObject() end
     if IsValid(self.PhysObj) and self.PhysObj:IsAsleep() then self.PhysObj:Wake() end
     if ct >= self.NextPassSound then
-        -- FIX: emit from self:GetPos() so players near the plane hear it, not orbit center
         self:EmitPlaneSound(table.Random(PASS_SOUNDS), self:GetPos(), 75, math.random(96, 104), 0.7, 0)
         self.NextPassSound = ct + math.Rand(4, 7)
     end
@@ -346,11 +350,11 @@ end
 
 function ENT:HandleWeaponWindow(ct)
     if not self.CurrentWeapon or ct >= self.WeaponWindowEnd then self:PickNewWeapon(ct) end
-    if self.CurrentWeapon == "25mm"       then self:Update25mmBurstsSchedule(ct)
-    elseif self.CurrentWeapon == "40mm"   then self:Update40mm(ct)
-    elseif self.CurrentWeapon == "105mm"  then self:Update105mm(ct)
+    if self.CurrentWeapon == "25mm"           then self:Update25mmBurstsSchedule(ct)
+    elseif self.CurrentWeapon == "40mm"       then self:Update40mm(ct)
+    elseif self.CurrentWeapon == "105mm"      then self:Update105mm(ct)
     elseif self.CurrentWeapon == "25mm_spray" then self:Update25mmSpray(ct)
-    elseif self.CurrentWeapon == "jassm" then self:UpdateJASSM(ct) end
+    elseif self.CurrentWeapon == "jassm"      then self:UpdateJASSM(ct) end
 end
 
 function ENT:PickNewWeapon(ct)
@@ -390,13 +394,25 @@ function ENT:PickNewWeapon(ct)
     end
 end
 
-function ENT:StartSprayLoop(soundPath) self.NextSpraySoundTime = CurTime() end
-function ENT:StopSprayLoop() self.NextSpraySoundTime = 0 end
+function ENT:StartSprayLoop() self.NextSpraySoundTime = CurTime() end
+function ENT:StopSprayLoop()  self.NextSpraySoundTime = 0 end
+
+-- ============================================================
+-- GAU MUZZLE FX  (server side)
+-- Flash is broadcast immediately via bombin_gau_muzzle_flash.
+-- Sound is broadcast via bombin_plane_sound (no extraDelay=0 here
+-- because each client adds its own travel delay from the flash position).
+-- Both use the same muzzle world position so the delay is consistent.
+-- ============================================================
+function ENT:FireGAUFlashAndSound(muzzlePos, scale)
+    local snd = table.Random(GAU_BRRT_SOUNDS)
+    -- Flash event: client renders instantly, then schedules the brrt internally
+    self:BroadcastGAUFlash(muzzlePos, scale or 1, snd, GAU_SOUND_SPEED)
+end
 
 function ENT:PlaySpraySoundAndFlash(ct)
-    -- FIX: emit from self:GetPos() instead of self.CenterPos
-    self:EmitPlaneSound(table.Random(GAU_BRRT_SOUNDS), self:GetPos(), 110, math.random(96, 104), 1.0, 0)
-    self:SpawnWeaponMuzzleFX("cball_explode", 1)
+    local muzzlePos = self:GetWeaponMuzzleWorldPos()
+    self:FireGAUFlashAndSound(muzzlePos, 1)
     self.NextSpraySoundTime = ct + self.GAU_SpraySoundDelay
 end
 
@@ -441,23 +457,6 @@ function ENT:GetWeaponMuzzleWorldPos()
     return self:LocalToWorld(self.MuzzlePoints[self.MuzzleIndexWeapon])
 end
 
-function ENT:SpawnWeaponMuzzleFX(effectName, scale)
-    local worldPos = self:GetWeaponMuzzleWorldPos()
-    local ang      = self:GetAngles()
-    local ed = EffectData() ed:SetOrigin(worldPos) ed:SetAngles(ang) ed:SetScale(scale or 1)
-    util.Effect(effectName, ed, true, true)
-    for _ = 1, 2 do
-        local sp = EffectData()
-        sp:SetOrigin(worldPos + Vector(math.Rand(-4,4), math.Rand(-4,4), 0))
-        sp:SetNormal(ang:Up()) sp:SetScale(scale or 1) sp:SetMagnitude(scale or 1) sp:SetRadius(8 * (scale or 1))
-        util.Effect("ManhackSparks", sp, true, true)
-    end
-end
-
--- ============================================================
--- GAU FIRE  --  uses ent_bombin_gau_bullet (ka52 pattern)
--- ============================================================
-
 function ENT:FireGAUBulletAt(muzzlePos, impactPos, bulletIndex)
     local dir = impactPos - muzzlePos
     if dir:LengthSqr() < 1 then return end
@@ -467,8 +466,8 @@ function ENT:FireGAUBulletAt(muzzlePos, impactPos, bulletIndex)
     if not IsValid(bullet) then return end
     bullet:SetPos(muzzlePos)
     bullet:SetAngles(dir:Angle())
-    bullet.Firer      = self
-    bullet.MuzzlePos  = muzzlePos
+    bullet.Firer       = self
+    bullet.MuzzlePos   = muzzlePos
     bullet.BulletIndex = bulletIndex or 1
     bullet.HEIInterval = self.GAU_HEI_Interval
     bullet.BulletRad   = self.GAU_BlastRadius
@@ -496,9 +495,9 @@ function ENT:StartGAUBurst()
     self.GAU_SweepStartPos = targetPos - sweepDir * self.GAU_SweepHalfLength
     self.GAU_SweepEndPos   = targetPos + sweepDir * self.GAU_SweepHalfLength
     table.insert(self.GAU_ActiveBursts, { bulletsFired = 0, nextTime = CurTime() })
-    self:SpawnWeaponMuzzleFX("cball_explode", 1)
-    -- FIX: emit from self:GetPos(), travel delay applied client-side
-    self:EmitPlaneSound(table.Random(GAU_BRRT_SOUNDS), self:GetPos(), 110, math.random(96, 104), 1.0, 0)
+    -- Flash immediately, brrt delayed by distance on each client
+    local muzzlePos = self:GetWeaponMuzzleWorldPos()
+    self:FireGAUFlashAndSound(muzzlePos, 1)
 end
 
 function ENT:UpdateActiveGAUBursts(ct)
@@ -574,8 +573,9 @@ function ENT:Update40mm(ct)
             if IsValid(phys) then phys:SetVelocity(dir * 1600) end
         end
     end
-    self:SpawnWeaponMuzzleFX("cball_explode", 2)
-    -- FIX: emit from muzzle position, travel delay applied client-side per player
+    -- 40mm: flash via standard effect (broadcast), sound delayed by distance
+    local ed = EffectData() ed:SetOrigin(muzzlePos) ed:SetAngles(self:GetAngles()) ed:SetScale(2)
+    util.Effect("cball_explode", ed, true, true)
     self:EmitPlaneSound("killstreak_rewards/ac-130_40mm_fire.wav", muzzlePos, 110, math.random(96, 104), 1.0, 0)
 end
 
@@ -630,8 +630,9 @@ function ENT:Update105mm(ct)
             if IsValid(phys) then phys:SetVelocity(dir * 1800) end
         end
     end
-    self:SpawnWeaponMuzzleFX("cball_explode", 3)
-    -- FIX: emit from muzzle position, travel delay applied client-side per player
+    -- 105mm: flash via standard effect (broadcast), sound delayed by distance
+    local ed = EffectData() ed:SetOrigin(muzzlePos) ed:SetAngles(self:GetAngles()) ed:SetScale(3)
+    util.Effect("cball_explode", ed, true, true)
     self:EmitPlaneSound("killstreak_rewards/ac-130_105mm_fire.wav", muzzlePos, 110, math.random(96, 104), 1.0, 0)
 end
 
