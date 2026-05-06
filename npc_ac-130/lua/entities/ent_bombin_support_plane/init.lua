@@ -180,6 +180,10 @@ ENT.Plane_Ambient_SoundPath = "ac/bomber_engine_high.wav"
 
 ENT.JASSM_AltOffset = 500
 
+-- Local-space offset to the model's tail bay (negative X = rearward in model space).
+-- Tweak this value if the model's rear ramp sits at a different offset.
+ENT.JASSM_TailOffset = Vector(-420, 0, 0)
+
 ENT.MaxHP = 8000
 ENT.DamageTierThresholds = { 0.75, 0.50, 0.25 }
 
@@ -749,35 +753,53 @@ end
 function ENT:UpdateJASSM(ct)
     if self.JASSM_Fired then return end
     self.JASSM_Fired = true
-    if not scripted_ents.GetStored("ent_bombin_jassm") then self:Debug("JASSM: ent_bombin_jassm not registered, skipping") return end
-    local planePos  = self:GetPos()
-    local backward  = -self:GetForward()
-    backward.z      = 0
-    if backward:LengthSqr() < 0.01 then backward = Vector(-1,0,0) end
-    backward:Normalize()
+
+    if not scripted_ents.GetStored("ent_bombin_jassm") then
+        self:Debug("JASSM: ent_bombin_jassm not registered, skipping")
+        return
+    end
+
+    -- Derive the JASSM altitude from the altitude stagger counter.
     self.JASSM_DeployCount = (self.JASSM_DeployCount or 0) + 1
     local jassmAlt = self.sky - (self.JASSM_DeployCount * self.JASSM_AltOffset)
-    local spawnPos = Vector(
-        planePos.x + backward.x * self.OrbitRadius * 1.2,
-        planePos.y + backward.y * self.OrbitRadius * 1.2,
-        jassmAlt
-    )
-    if not util.IsInWorld(spawnPos) then spawnPos = Vector(self.CenterPos.x, self.CenterPos.y, jassmAlt) end
+
+    -- Spawn position = plane's physical tail in world space.
+    -- LocalToWorld(JASSM_TailOffset) accounts for the plane's current
+    -- position AND angles, so the JASSM always appears at the rear of the
+    -- model regardless of heading.  We then override Z to jassmAlt so the
+    -- missile starts at the correct staggered altitude rather than the
+    -- plane's live Z (which includes jitter/drift).
+    local tailWorld = self:LocalToWorld(self.JASSM_TailOffset)
+    local spawnPos  = Vector(tailWorld.x, tailWorld.y, jassmAlt)
+
+    -- Fallback: if the tail point is somehow out of the world (e.g. the
+    -- plane is clipping a skybox boundary), use CenterPos XY.
+    if not util.IsInWorld(spawnPos) then
+        spawnPos = Vector(self.CenterPos.x, self.CenterPos.y, jassmAlt)
+    end
+
+    -- callDir = the plane's current flat forward — JASSM inherits the same
+    -- heading so it orbits in the same direction as the AC-130.
     local callDir = self:GetForward()
     callDir.z     = 0
-    if callDir:LengthSqr() < 0.01 then callDir = Vector(1,0,0) end
+    if callDir:LengthSqr() < 0.01 then callDir = Vector(1, 0, 0) end
     callDir:Normalize()
+
     local jassm = ents.Create("ent_bombin_jassm")
     if not IsValid(jassm) then self:Debug("JASSM: ents.Create failed") return end
-    jassm:SetPos(spawnPos) jassm:SetAngles(callDir:Angle())
+
+    jassm:SetPos(spawnPos)
+    jassm:SetAngles(callDir:Angle())
     jassm:SetVar("CenterPos",    self.CenterPos)
     jassm:SetVar("CallDir",      callDir)
     jassm:SetVar("Lifetime",     math.min(self.Lifetime, 35))
     jassm:SetVar("Speed",        250)
     jassm:SetVar("OrbitRadius",  self.OrbitRadius * 0.75)
     jassm:SetVar("SkyHeightAdd", math.max(jassmAlt - (self.sky - self.SkyHeightAdd), 800))
-    jassm:Spawn() jassm:Activate()
-    self:Debug("JASSM deployed from rear at " .. tostring(spawnPos) .. " alt=" .. tostring(jassmAlt))
+    jassm:Spawn()
+    jassm:Activate()
+
+    self:Debug("JASSM deployed from tail at " .. tostring(spawnPos) .. " alt=" .. tostring(jassmAlt))
 end
 
 function ENT:FindGround(centerPos)
