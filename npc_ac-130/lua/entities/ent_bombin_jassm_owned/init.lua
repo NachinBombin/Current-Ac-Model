@@ -3,14 +3,10 @@
 -- Spawned exclusively by ent_bombin_support_plane:UpdateJASSM().
 -- No menu / no admin spawner.
 --
--- Fixes vs source repo (agm158-jassm-dive / Parachute branch):
---   1. JASSM_DeployCount stacking: altitude is now clamped so it never
---      goes below ground regardless of how many JARSMs the plane drops.
---   2. Chute entity updated to ent_bombin_jassm_chute_owned (local copy).
---   3. Orbit Z is now blended into phys velocity instead of raw SetPos,
---      reducing CCD gaps on low-tickrate servers.
---   4. Chute spawns at the missile tail, not missile center-of-mass.
---   5. Minor: all entity class references updated to _owned variants.
+-- When self.SpawnedFromPlane == true the missile was placed at the
+-- AC-130's tail by UpdateJASSM() before Spawn() was called.
+-- Initialize() skips the orbit-entry math and uses self:GetPos()
+-- as the freefall start position directly.
 
 AddCSLuaFile("cl_init.lua")
 AddCSLuaFile("shared.lua")
@@ -30,14 +26,10 @@ local SHARD_MODEL       = "models/props_c17/FurnitureDrawer001a_Shard01.mdl"
 local GRAVITY_MULT      = 1.5
 local SHARD_LIFE        = 8
 
-local FREEFALL_DROP     = 900   -- units above orbit altitude where missile spawns
+local FREEFALL_DROP     = 900   -- must match JASSM_FREEFALL_DROP in support_plane/init.lua
 local FREEFALL_MAX_FALL = 320   -- terminal velocity cap (u/s downward)
 
--- Chute tail placement:
---   CHUTE_TAIL_OFFSET = how far behind the missile nose the tail is (along -forward)
---   CHUTE_ABOVE       = how far above the tail position the chute floats
-local CHUTE_TAIL_OFFSET = 120
-local CHUTE_ABOVE       = 105
+local CHUTE_ABOVE = 105   -- chute floats this many units above the missile origin
 
 ENT.WeaponWindow       = 8
 ENT.DIVE_Speed         = 2200
@@ -56,13 +48,13 @@ end
 -- ================================================================
 
 function ENT:Initialize()
-	self.CenterPos    = self:GetVar("CenterPos",    self:GetPos())
-	self.CallDir      = self:GetVar("CallDir",      Vector(1, 0, 0))
-	self.Lifetime     = self:GetVar("Lifetime",     40)
-	self.SkyHeightAdd = self:GetVar("SkyHeightAdd", 2500)
+	self.CenterPos    = self.CenterPos    or self:GetPos()
+	self.CallDir      = self.CallDir      or Vector(1, 0, 0)
+	self.Lifetime     = self.Lifetime     or 40
+	self.SkyHeightAdd = self.SkyHeightAdd or 2500
 
-	self.DIVE_ExplosionDamage = self:GetVar("DIVE_ExplosionDamage", 1200)
-	self.DIVE_ExplosionRadius = self:GetVar("DIVE_ExplosionRadius", 1200)
+	self.DIVE_ExplosionDamage = self.DIVE_ExplosionDamage or 1200
+	self.DIVE_ExplosionRadius = self.DIVE_ExplosionRadius or 1200
 
 	self.MaxHP = 200
 
@@ -83,8 +75,8 @@ function ENT:Initialize()
 	self.DieTime   = CurTime() + self.Lifetime
 	self.SpawnTime = CurTime()
 
-	local baseRadius = self:GetVar("OrbitRadius", 2500)
-	local baseSpeed  = self:GetVar("Speed",        250)
+	local baseRadius = self.OrbitRadius or 2500
+	local baseSpeed  = self.Speed       or 250
 	self.OrbitRadius = baseRadius * math.Rand(0.82, 1.18)
 	self.Speed       = baseSpeed  * math.Rand(0.85, 1.15)
 
@@ -92,15 +84,32 @@ function ENT:Initialize()
 	self.OrbitAngle    = math.Rand(0, math.pi * 2)
 	self.OrbitAngSpeed = (self.Speed / self.OrbitRadius) * self.OrbitDir
 
-	local entryRad    = self.OrbitAngle
-	local entryOffset = Vector(math.cos(entryRad), math.sin(entryRad), 0)
+	-- ----------------------------------------------------------------
+	--  Spawn position
+	--
+	--  When SpawnedFromPlane is true, UpdateJASSM() already called
+	--  jassm:SetPos(tailPos) before Spawn().  We just use that.
+	--
+	--  When spawned standalone (testing / other callers) we compute a
+	--  sensible orbit-entry position as before.
+	-- ----------------------------------------------------------------
+	local spawnPos
 
-	local orbitXY  = self.CenterPos + entryOffset * (self.OrbitRadius * 1.05)
-	local spawnPos = Vector(orbitXY.x, orbitXY.y, self.sky + FREEFALL_DROP)
-
-	if not util.IsInWorld(spawnPos) then
-		spawnPos = Vector(self.CenterPos.x, self.CenterPos.y, self.sky + FREEFALL_DROP)
+	if self.SpawnedFromPlane then
+		-- Position was set by the AC-130 before Spawn() -- use it directly.
+		spawnPos = self:GetPos()
+		self:Debug("SpawnedFromPlane: using tail pos " .. tostring(spawnPos))
+	else
+		local entryRad    = self.OrbitAngle
+		local entryOffset = Vector(math.cos(entryRad), math.sin(entryRad), 0)
+		local orbitXY     = self.CenterPos + entryOffset * (self.OrbitRadius * 1.05)
+		spawnPos = Vector(orbitXY.x, orbitXY.y, self.sky + FREEFALL_DROP)
+		if not util.IsInWorld(spawnPos) then
+			spawnPos = Vector(self.CenterPos.x, self.CenterPos.y, self.sky + FREEFALL_DROP)
+		end
+		self:Debug("Standalone: orbit-entry spawn " .. tostring(spawnPos))
 	end
+
 	if not util.IsInWorld(spawnPos) then
 		self:Debug("Spawn position out of world")
 		self:Remove()
@@ -122,9 +131,9 @@ function ENT:Initialize()
 	self:SetNWBool("Destroyed", false)
 	self:SetNWBool("EngineOn",  false)
 
-	-- tangent = the missile's initial facing direction (perpendicular to the radius, in orbit direction)
-	local tangent  = Vector(-entryOffset.y, entryOffset.x, 0) * self.OrbitDir
-	local startAng = tangent:Angle()
+	local entryOffset = Vector(math.cos(self.OrbitAngle), math.sin(self.OrbitAngle), 0)
+	local tangent     = Vector(-entryOffset.y, entryOffset.x, 0) * self.OrbitDir
+	local startAng    = tangent:Angle()
 	self:SetAngles(Angle(0, startAng.y, 0))
 	self.ang = self:GetAngles()
 
@@ -189,26 +198,18 @@ function ENT:Initialize()
 	self.EngineIgnited = false
 	self.ChuteEnt      = nil
 
-	-- Compute the tail position from the missile's facing direction at birth.
-	-- tangent is the forward vector (flat, normalized).
-	-- Tail = spawnPos  -forward * CHUTE_TAIL_OFFSET  +up * CHUTE_ABOVE
-	-- After this one-shot placement the chute's own Think() takes over,
-	-- tracking missile:GetPos() + ABOVE_OFFSET every tick.
-	local tailPos = spawnPos
-		+ (-tangent) * CHUTE_TAIL_OFFSET
-		+ Vector(0, 0, CHUTE_ABOVE)
-
+	-- Chute spawns directly above the missile's spawn position.
 	local chute = ents.Create("ent_bombin_jassm_chute_owned")
 	if IsValid(chute) then
 		chute:SetOwner(self)
-		chute:SetPos(tailPos)
+		chute:SetPos(Vector(spawnPos.x, spawnPos.y, spawnPos.z + CHUTE_ABOVE))
 		chute:SetAngles(Angle(0, startAng.y, 0))
 		chute:Spawn()
 		chute:Activate()
 		self.ChuteEnt = chute
 	end
 
-	self:Debug("Spawned (freefall) at " .. tostring(spawnPos) .. ", chute tail at " .. tostring(tailPos) .. ", ignition alt " .. math.Round(self.sky))
+	self:Debug("Spawned at " .. tostring(spawnPos) .. ", ignition alt " .. math.Round(self.sky))
 end
 
 -- ================================================================
@@ -220,12 +221,10 @@ function ENT:IgniteEngine()
 	self.EngineIgnited = true
 	self:SetNWBool("EngineOn", true)
 
-	-- Deploy wings
 	self:SetBodygroup(1, 1)
 
 	local pos = self:GetPos()
 
-	-- Switch to vphysics for orbit phase
 	self:PhysicsInit(SOLID_VPHYSICS)
 	self:SetMoveType(MOVETYPE_VPHYSICS)
 	self:SetSolid(SOLID_VPHYSICS)
@@ -241,7 +240,6 @@ function ENT:IgniteEngine()
 		self.PhysObj:SetVelocity(fwd * self.Speed)
 	end
 
-	-- Ignition visual flash (no damage)
 	local ed = EffectData()
 	ed:SetOrigin(pos + self:GetForward() * -55)
 	ed:SetScale(2)
@@ -482,7 +480,6 @@ function ENT:PhysicsUpdate(phys)
 	local dt  = FrameTime()
 	if dt <= 0 then dt = 0.01 end
 
-	-- Wander the orbit center on two slow sinusoidal axes
 	self.WanderPhaseX = self.WanderPhaseX + self.WanderRateX
 	self.WanderPhaseY = self.WanderPhaseY + self.WanderRateY
 	self.CenterPos = Vector(
@@ -502,7 +499,6 @@ function ENT:PhysicsUpdate(phys)
 	local yawCorrection = math.Clamp(yawError * 0.08, -0.6, 0.6)
 	self.ang            = self.ang + Angle(0, yawCorrection, 0)
 
-	-- Two-layer altitude jitter
 	self.JitterPhase  = self.JitterPhase  + self.JitterRate1
 	self.JitterPhase2 = self.JitterPhase2 + self.JitterRate2
 	local jitter = math.sin(self.JitterPhase)  * self.JitterAmp1
@@ -515,14 +511,12 @@ function ENT:PhysicsUpdate(phys)
 	self.AltDriftCurrent = Lerp(self.AltDriftLerp, self.AltDriftCurrent, self.AltDriftTarget)
 	local liveAlt = self.AltDriftCurrent + jitter
 
-	-- XY steering: desired orbit pos + forward speed vector
 	local posErr = Vector(desiredX - pos.x, desiredY - pos.y, 0)
 	local vel    = self:GetForward() * self.Speed
 	if posErr:LengthSqr() > 400 then
 		vel = vel + posErr:GetNormalized() * 80
 	end
 
-	-- Blend altitude correction into velocity Z (no raw SetPos)
 	local altError = liveAlt - pos.z
 	vel.z = math.Clamp(altError * 8, -120, 120)
 
@@ -607,7 +601,6 @@ function ENT:InitDive(ct)
 		return
 	end
 
-	-- Pitch-down telegraph during the 1s lock window
 	local frac = math.Clamp((ct - (self.DiveCommitTime - 1.0)) / 1.0, 0, 1)
 	self.DivePitchTelegraph = frac * -60
 	self:SetAngles(Angle(self.DivePitchTelegraph, self.ang.y, self.SmoothedRoll))
@@ -634,7 +627,6 @@ function ENT:InitDive(ct)
 	self.DiveSpeedCurrent   = self.DiveSpeedMin
 	self.DiveAimOffset      = Vector(math.Rand(-400, 400), math.Rand(-400, 400), 0)
 
-	-- Allow collisions with everything so the missile reaches the ground
 	self:SetCollisionGroup(COLLISION_GROUP_NONE)
 	self:SetSolid(SOLID_VPHYSICS)
 	if IsValid(self.PhysObj) then

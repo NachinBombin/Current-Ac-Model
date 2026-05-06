@@ -100,8 +100,8 @@ ENT.Plane_Ambient_SoundPath = "ac/ac -130B.wav"
 -- air_130_l.mdl: nose-to-tail ~840u, tail is ~420u behind origin.
 local PLANE_TAIL_BACK = 420
 
--- JASSM freefall start is this many units ABOVE orbit altitude.
--- Must match FREEFALL_DROP in ent_bombin_jassm/init.lua.
+-- JASSM freefall start is this many units ABOVE the plane's live Z.
+-- Must match FREEFALL_DROP in ent_bombin_jassm_owned/init.lua.
 local JASSM_FREEFALL_DROP = 900
 
 ENT.JASSM_AltOffset = 1500
@@ -620,74 +620,65 @@ end
 
 -- ============================================================
 --  JASSM DEPLOYMENT
---  The missile+chute combo spawns DIRECTLY AT THE PLANE'S TAIL.
---  No orbit-entry math.  Parameters are written as direct Lua
---  fields on the entity object BEFORE Spawn()/Activate() so
---  Initialize() can read them as self.X without any GetVar/SetVar
---  (which does not survive the Spawn call in GLua scripted_ents).
+--  Spawns ent_bombin_jassm_owned (the AC-130's own missile entity)
+--  directly at the plane's tail.  No orbit-entry math here.
 -- ============================================================
 function ENT:UpdateJASSM(ct)
     if self.JASSM_Fired then return end
     self.JASSM_Fired = true
 
-    if not scripted_ents.GetStored("ent_bombin_jassm") then
-        self:Debug("JASSM: ent_bombin_jassm not registered, skipping")
+    if not scripted_ents.GetStored("ent_bombin_jassm_owned") then
+        self:Debug("JASSM: ent_bombin_jassm_owned not registered, skipping")
         return
     end
 
-    -- ---- Tail position ----
-    -- The plane's forward vector points at the nose; tail is directly behind.
-    local planePos = self:GetPos()                        -- live position including jitter
+    -- Compute the plane's tail position in world space.
+    local planePos = self:GetPos()
     local planeFwd = self:GetForward()
     planeFwd.z = 0
-    if planeFwd:LengthSqr() < 0.01 then planeFwd = Vector(1,0,0) end
+    if planeFwd:LengthSqr() < 0.01 then planeFwd = Vector(1, 0, 0) end
     planeFwd:Normalize()
 
     local tailXY = planePos + (-planeFwd) * PLANE_TAIL_BACK
 
-    -- ---- Altitude ----
-    -- Each successive JASSM spawns 1500u lower than the previous so they
-    -- don't collide during freefall. Cap so we never go underground.
+    -- Each successive JASSM spawns at a lower orbit altitude so they
+    -- don't collide during freefall.  Cap so we never go underground.
     self.JASSM_DeployCount = (self.JASSM_DeployCount or 0) + 1
-    local groundZ   = self.sky - self.SkyHeightAdd
-    local orbitAlt  = self.sky - (self.JASSM_DeployCount * self.JASSM_AltOffset)
-    orbitAlt        = math.max(orbitAlt, groundZ + 800)
+    local groundZ  = self.sky - self.SkyHeightAdd
+    local orbitAlt = self.sky - (self.JASSM_DeployCount * self.JASSM_AltOffset)
+    orbitAlt       = math.max(orbitAlt, groundZ + 800)
 
-    -- Spawn Z = orbit altitude + freefall drop so the missile begins
-    -- ABOVE orbit altitude and falls DOWN into orbit, matching the
-    -- freefall->ignition logic in ent_bombin_jassm/init.lua.
-    local spawnZ   = planePos.z + JASSM_FREEFALL_DROP   -- drop is relative to plane's live Z
+    -- Spawn Z = plane's live Z + freefall drop.
+    -- The missile begins above the plane and falls down into orbit.
+    local spawnZ   = planePos.z + JASSM_FREEFALL_DROP
     local spawnPos = Vector(tailXY.x, tailXY.y, spawnZ)
     if not util.IsInWorld(spawnPos) then
         spawnPos = Vector(self.CenterPos.x, self.CenterPos.y, spawnZ)
     end
 
-    -- ---- Create the entity and set ALL parameters as plain fields ----
-    -- Fields are set BEFORE Spawn()/Activate() so Initialize() reads them
-    -- directly as self.X.  SetVar/GetVar is intentionally NOT used here.
-    local jassm = ents.Create("ent_bombin_jassm")
+    local jassm = ents.Create("ent_bombin_jassm_owned")
     if not IsValid(jassm) then self:Debug("JASSM: ents.Create failed") return end
 
-    -- Position the entity at the tail right now.
+    -- Place at the tail BEFORE Spawn() so Initialize() reads self:GetPos()
+    -- as the tail position when SpawnedFromPlane is true.
     jassm:SetPos(spawnPos)
     jassm:SetAngles(planeFwd:Angle())
 
-    -- Plane context.
-    jassm.CenterPos    = self.CenterPos
-    jassm.CallDir      = planeFwd
-    jassm.Lifetime     = math.min(self.Lifetime, 35)
-    jassm.Speed        = 250
-    jassm.OrbitRadius  = self.OrbitRadius * 0.75
-    -- SkyHeightAdd for the JASSM is measured from ground to its orbit alt.
-    jassm.SkyHeightAdd = math.max(orbitAlt - groundZ, 800)
-    -- Tell Initialize() to skip position computation and use self:GetPos().
+    -- Pass context as plain fields; Initialize() reads these as self.X.
+    jassm.CenterPos       = self.CenterPos
+    jassm.CallDir         = planeFwd
+    jassm.Lifetime        = math.min(self.Lifetime, 35)
+    jassm.Speed           = 250
+    jassm.OrbitRadius     = self.OrbitRadius * 0.75
+    jassm.SkyHeightAdd    = math.max(orbitAlt - groundZ, 800)
+    -- Flag: skip orbit-entry spawn math and use self:GetPos() directly.
     jassm.SpawnedFromPlane = true
 
     jassm:Spawn()
     jassm:Activate()
 
     self:Debug(string.format(
-        "JASSM deployed from tail %s (orbitAlt=%.0f, spawnZ=%.0f)",
+        "JASSM_owned deployed from tail %s (orbitAlt=%.0f spawnZ=%.0f)",
         tostring(spawnPos), orbitAlt, spawnZ
     ))
 end
