@@ -2,22 +2,15 @@ include("shared.lua")
 include("cl_trailsystem.lua")
 
 -- ============================================================
--- PRECACHE — only one PCF particle, confirmed working
+-- PRECACHE
 -- ============================================================
 game.AddParticles("particles/fire_01.pcf")
 PrecacheParticleSystem("fire_medium_02")
 
 -- ============================================================
 -- SOUND BROADCAST
--- Both "bombin_plane_sound" (legacy) and "bombin_plane_spatial_sound"
--- (per-player propagation system) share the identical wire format:
---   String  soundPath
---   Vector  nearPos       (NEAR_OFFSET u toward the plane from player)
---   UInt8   soundLevel
---   UInt8   pitch
---   Float   volume        (pre-attenuated by server; 0.0 – 1.0)
--- Playing at nearPos keeps the Source engine from re-attenuating;
--- volume is already distance-corrected server-side.
+-- bombin_plane_spatial_sound: per-player weapon sounds routed
+-- through the spatial delay system on the server.
 -- ============================================================
 local function HandlePlaneSound()
     local path   = net.ReadString()
@@ -32,14 +25,53 @@ net.Receive("bombin_plane_sound",         HandlePlaneSound)
 net.Receive("bombin_plane_spatial_sound", HandlePlaneSound)
 
 -- ============================================================
+-- AMBIENT ENGINE LOOP
+-- The server broadcasts bombin_plane_ambient_loop on spawn and
+-- removal. Each client creates/stops its own CSoundPatch
+-- attached to the entity locally, which means Source's audio
+-- engine handles 3D positioning correctly without sky-distance
+-- culling killing the sound before it reaches the listener.
+-- ============================================================
+local AmbientLoops = {}  -- [entIndex] = CSoundPatch
+
+net.Receive("bombin_plane_ambient_loop", function()
+    local entIndex = net.ReadUInt(16)
+    local sndPath  = net.ReadString()
+    local shouldPlay = net.ReadBool()
+
+    if shouldPlay then
+        local ent = Entity(entIndex)
+        -- Entity may not be networked to this client yet; defer until valid
+        if not IsValid(ent) then
+            timer.Simple(0.5, function()
+                local e = Entity(entIndex)
+                if not IsValid(e) then return end
+                local snd = CreateSound(e, sndPath)
+                if snd then
+                    snd:SetSoundLevel(80)
+                    snd:Play()
+                    AmbientLoops[entIndex] = snd
+                end
+            end)
+        else
+            local snd = CreateSound(ent, sndPath)
+            if snd then
+                snd:SetSoundLevel(80)
+                snd:Play()
+                AmbientLoops[entIndex] = snd
+            end
+        end
+    else
+        local snd = AmbientLoops[entIndex]
+        if snd then
+            snd:Stop()
+            AmbientLoops[entIndex] = nil
+        end
+    end
+end)
+
+-- ============================================================
 -- DAMAGE TIERS
--- Persistent fire: fire_medium_02, more emitters per tier
--- Periodic bursts: util.Effect only (no PCF, never fails)
---
--- Tier 1: 1 fire emitter.  Bursts: explosion + sparks
--- Tier 2: 3 fire emitters. Bursts: explosion + sparks + electric
--- Tier 3: 6 fire emitters. Bursts: big explosion + sparks + electric
---                          + extra Explosion pops on wingtips
 -- ============================================================
 
 local TIER_OFFSETS = {
@@ -66,9 +98,6 @@ local TIER_BURST_COUNT = { [1] = 1,   [2] = 2,   [3] = 4   }
 
 local PlaneStates = {}
 
--- ============================================================
--- BURST FX — util.Effect only, zero PCF dependency
--- ============================================================
 local function BurstAt(wPos, tier)
     local ed = EffectData()
     ed:SetOrigin(wPos)
@@ -120,9 +149,6 @@ local function SpawnBurstFX(ent, count, tier)
     end
 end
 
--- ============================================================
--- PARTICLE MANAGEMENT
--- ============================================================
 local function StopParticles(state)
     if not state.particles then return end
     for _, p in ipairs(state.particles) do
@@ -147,15 +173,11 @@ local function ApplyFlameParticles(ent, state, tier)
     state.nextBurst = CurTime() + (TIER_BURST_DELAY[tier] or 4)
 end
 
--- ============================================================
--- NET
--- ============================================================
 net.Receive("bombin_plane_damage_tier", function()
     local entIndex = net.ReadUInt(16)
     local tier     = net.ReadUInt(2)
     local ent      = Entity(entIndex)
 
-    -- Trail system tier update
     PlaneTrailSystem_SetTier( entIndex, tier )
 
     local state = PlaneStates[entIndex]
@@ -175,9 +197,6 @@ net.Receive("bombin_plane_damage_tier", function()
     end
 end)
 
--- ============================================================
--- THINK
--- ============================================================
 hook.Add("Think", "bombin_plane_damage_fx", function()
     local ct = CurTime()
     for entIndex, state in pairs(PlaneStates) do
