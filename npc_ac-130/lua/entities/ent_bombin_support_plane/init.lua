@@ -8,9 +8,19 @@ end
 
 -- Real speed of sound in GMod units (343 m/s, 1 unit = 1 cm => 34300 u/s).
 -- GAU_SOUND_SPEED is intentionally reduced for exaggerated gameplay feel:
--- at 6000 units altitude, the brrt arrives ~1.4s after the flash instead of 0.17s.
+-- at 6000 units altitude, the brrt arrives ~0.75s after the flash instead of 0.17s.
 local SOUND_SPEED_UNITS = 34300
 local GAU_SOUND_SPEED   = 8000  -- exaggerated: ~1/4 real speed, big delay at altitude
+
+-- Sound levels (Source engine dB scale):
+--   75  = heard ~500u   (footsteps)
+--   110 = heard ~2000u  (gunshots)
+--   160 = heard across the full map (~16000u+)
+-- Weapon fire at 6000+ unit altitude MUST use 160 to reach ground-level players.
+local SND_LEVEL_AMBIENT  = 90   -- idle/ambient loops on the plane entity
+local SND_LEVEL_WEAPONS  = 160  -- all weapon fire (GAU, 40mm, 105mm)
+local SND_LEVEL_PASS     = 155  -- random flyover pass sounds
+local SND_LEVEL_DESTRUCT = 160  -- destruction explosion
 
 local PRECALC_SOUNDS = {
     "killstreak_rewards/ac-130_105mm_fire.wav",
@@ -210,14 +220,23 @@ function ENT:Initialize()
         self.PhysObj:EnableGravity(false)
     end
 
+    -- Ambient loops: raised to SND_LEVEL_AMBIENT (90) so they're audible
+    -- from the ground without dominating over weapon fire.
     self.IdleLoop = CreateSound(self, "ac-130_kill_sounds/AC130_idle_inside.mp3")
-    if self.IdleLoop then self.IdleLoop:SetSoundLevel(60) self.IdleLoop:Play() end
+    if self.IdleLoop then
+        self.IdleLoop:SetSoundLevel(SND_LEVEL_AMBIENT)
+        self.IdleLoop:Play()
+    end
 
     self.PlaneAmbientLoop = CreateSound(self, self.Plane_Ambient_SoundPath)
-    if self.PlaneAmbientLoop then self.PlaneAmbientLoop:SetSoundLevel(80) self.PlaneAmbientLoop:Play() end
+    if self.PlaneAmbientLoop then
+        self.PlaneAmbientLoop:SetSoundLevel(SND_LEVEL_AMBIENT)
+        self.PlaneAmbientLoop:Play()
+    end
 
     self.NextSpraySoundTime = 0
-    self:EmitPlaneSound(table.Random(PASS_SOUNDS), spawnPos, 75, 100, 0.7, 0)
+    -- Pass sound on spawn: full weapon-level volume so players hear the arrival.
+    self:EmitPlaneSound(table.Random(PASS_SOUNDS), spawnPos, SND_LEVEL_PASS, 100, 1.0, 0)
     self:Debug("Spawned at " .. tostring(spawnPos))
 
     self.CurrentWeapon      = nil
@@ -283,8 +302,8 @@ function ENT:DestroyPlane()
     local ed2 = EffectData() ed2:SetOrigin(pos) ed2:SetScale(5) ed2:SetMagnitude(5) ed2:SetRadius(500) util.Effect("500lb_air", ed2, true, true)
     local ed3 = EffectData() ed3:SetOrigin(pos + Vector(0,0,80)) ed3:SetScale(4) ed3:SetMagnitude(4) ed3:SetRadius(400) util.Effect("500lb_air", ed3, true, true)
     local ed4 = EffectData() ed4:SetOrigin(pos + Vector(0,0,180)) ed4:SetScale(3) ed4:SetMagnitude(3) ed4:SetRadius(300) util.Effect("500lb_air", ed4, true, true)
-    self:EmitPlaneSound("ambient/explosions/explode_8.wav", pos, 140, 90,  1.0, 0)
-    self:EmitPlaneSound("weapon_AWP.Single",               pos, 145, 60,  1.0, 0)
+    self:EmitPlaneSound("ambient/explosions/explode_8.wav", pos, SND_LEVEL_DESTRUCT, 90,  1.0, 0)
+    self:EmitPlaneSound("weapon_AWP.Single",               pos, SND_LEVEL_DESTRUCT, 60,  1.0, 0)
     util.BlastDamage(self, self, pos, 400, 200)
     self:Remove()
 end
@@ -296,7 +315,7 @@ function ENT:Think()
     if not IsValid(self.PhysObj) then self.PhysObj = self:GetPhysicsObject() end
     if IsValid(self.PhysObj) and self.PhysObj:IsAsleep() then self.PhysObj:Wake() end
     if ct >= self.NextPassSound then
-        self:EmitPlaneSound(table.Random(PASS_SOUNDS), self:GetPos(), 75, math.random(96, 104), 0.7, 0)
+        self:EmitPlaneSound(table.Random(PASS_SOUNDS), self:GetPos(), SND_LEVEL_PASS, math.random(96, 104), 1.0, 0)
         self.NextPassSound = ct + math.Rand(4, 7)
     end
     self:HandleWeaponWindow(ct)
@@ -400,13 +419,11 @@ function ENT:StopSprayLoop()  self.NextSpraySoundTime = 0 end
 -- ============================================================
 -- GAU MUZZLE FX  (server side)
 -- Flash is broadcast immediately via bombin_gau_muzzle_flash.
--- Sound is broadcast via bombin_plane_sound (no extraDelay=0 here
--- because each client adds its own travel delay from the flash position).
--- Both use the same muzzle world position so the delay is consistent.
+-- Sound is broadcast via bombin_plane_sound (each client adds its own
+-- travel delay from the flash position).
 -- ============================================================
 function ENT:FireGAUFlashAndSound(muzzlePos, scale)
     local snd = table.Random(GAU_BRRT_SOUNDS)
-    -- Flash event: client renders instantly, then schedules the brrt internally
     self:BroadcastGAUFlash(muzzlePos, scale or 1, snd, GAU_SOUND_SPEED)
 end
 
@@ -495,7 +512,6 @@ function ENT:StartGAUBurst()
     self.GAU_SweepStartPos = targetPos - sweepDir * self.GAU_SweepHalfLength
     self.GAU_SweepEndPos   = targetPos + sweepDir * self.GAU_SweepHalfLength
     table.insert(self.GAU_ActiveBursts, { bulletsFired = 0, nextTime = CurTime() })
-    -- Flash immediately, brrt delayed by distance on each client
     local muzzlePos = self:GetWeaponMuzzleWorldPos()
     self:FireGAUFlashAndSound(muzzlePos, 1)
 end
@@ -573,10 +589,10 @@ function ENT:Update40mm(ct)
             if IsValid(phys) then phys:SetVelocity(dir * 1600) end
         end
     end
-    -- 40mm: flash via standard effect (broadcast), sound delayed by distance
     local ed = EffectData() ed:SetOrigin(muzzlePos) ed:SetAngles(self:GetAngles()) ed:SetScale(2)
     util.Effect("cball_explode", ed, true, true)
-    self:EmitPlaneSound("killstreak_rewards/ac-130_40mm_fire.wav", muzzlePos, 110, math.random(96, 104), 1.0, 0)
+    -- 40mm: level 160 so it's heard from the ground at full altitude
+    self:EmitPlaneSound("killstreak_rewards/ac-130_40mm_fire.wav", muzzlePos, SND_LEVEL_WEAPONS, math.random(96, 104), 1.0, 0)
 end
 
 function ENT:Spawn105mmEffects(pos)
@@ -630,10 +646,10 @@ function ENT:Update105mm(ct)
             if IsValid(phys) then phys:SetVelocity(dir * 1800) end
         end
     end
-    -- 105mm: flash via standard effect (broadcast), sound delayed by distance
     local ed = EffectData() ed:SetOrigin(muzzlePos) ed:SetAngles(self:GetAngles()) ed:SetScale(3)
     util.Effect("cball_explode", ed, true, true)
-    self:EmitPlaneSound("killstreak_rewards/ac-130_105mm_fire.wav", muzzlePos, 110, math.random(96, 104), 1.0, 0)
+    -- 105mm: level 160 so it's heard from the ground at full altitude
+    self:EmitPlaneSound("killstreak_rewards/ac-130_105mm_fire.wav", muzzlePos, SND_LEVEL_WEAPONS, math.random(96, 104), 1.0, 0)
 end
 
 function ENT:UpdateJASSM(ct)
