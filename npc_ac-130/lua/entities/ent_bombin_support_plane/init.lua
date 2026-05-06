@@ -33,7 +33,135 @@ local GAU_BRRT_SOUNDS = {
 
 local GAU_CAL_ID = 3
 
+-- ============================================================
+-- SPATIAL PER-PLAYER SOUND SYSTEM
+-- Speed of sound in GMod units: 4200 u/s (roughly 343 m/s
+-- with the standard GMod unit scale of ~0.01905 m/u).
+--
+-- For each weapon discharge the server iterates every connected
+-- player and schedules a delayed net message that fires after
+-- the acoustic travel time (dist / 4200) for that player.
+-- The sound is played client-side very close to the player
+-- (NEAR_OFFSET units toward the plane) so GMod's engine
+-- attenuation does not re-attenuate it – volume is instead
+-- driven by our own falloff curve.
+--
+-- Volume falloff:  vol = base_vol * (1 - dist / MAX_HEAR_DIST)
+--   clamped [MIN_VOL, base_vol].  This is linear, intentionally
+--   simple so it matches what a real far-away gun sounds like
+--   (the loudness difference between 3 000 u and 12 000 u is
+--   dramatic, not subtle).
+--
+-- Sounds are played at  playerPos + towardPlane * NEAR_OFFSET
+-- so the Source engine still gives them a subtle directional cue
+-- (the sound subtly "comes from above") without distance-based
+-- engine attenuation kicking in.
+-- ============================================================
+
 util.AddNetworkString("bombin_plane_damage_tier")
+util.AddNetworkString("bombin_plane_spatial_sound")
+
+local SOUND_SPEED      = 4200   -- Source units per second
+local MAX_HEAR_DIST    = 18000  -- Beyond this: inaudible
+local MIN_VOL          = 0.05   -- Floor volume at max range
+local NEAR_OFFSET      = 40     -- Units toward plane; keeps sound near-ear
+
+-- Precache all weapon sounds so clients never stutter on first play
+local function PrecacheWeaponSounds()
+    for _, s in ipairs(PASS_SOUNDS)      do util.PrecacheSound(s) end
+    for _, s in ipairs(GAU_BRRT_SOUNDS)  do util.PrecacheSound(s) end
+    util.PrecacheSound("killstreak_rewards/ac-130_40mm_fire.wav")
+    util.PrecacheSound("killstreak_rewards/ac-130_105mm_fire.wav")
+    util.PrecacheSound("killstreak_rewards/ac-130_25mm_fire.wav")
+end
+PrecacheWeaponSounds()
+
+-- pending_sounds: list of { sendTime, ply, soundPath, nearPos, soundLevel, pitch, volume }
+-- Flushed every Think tick.
+local pending_sounds = {}
+
+--[[
+    ENT:EmitSpatialSound( soundPath, originPos, soundLevel, pitch, baseVol )
+
+    originPos  - where the gun actually fired (the plane position or muzzle).
+    soundLevel - attenuation hint sent to client (kept LOW because we
+                 play it near the player; use 60-75 to keep it local).
+    pitch      - pitch value, e.g. math.random(96,104).
+    baseVol    - volume at point-blank range (1.0 = full).
+
+    For each living player:
+      1. Compute distance from player to originPos.
+      2. If distance > MAX_HEAR_DIST, skip.
+      3. Compute volume = linear falloff between baseVol and MIN_VOL.
+      4. Compute delay   = distance / SOUND_SPEED.
+      5. Compute nearPos = playerPos + normalize(originPos-playerPos)*NEAR_OFFSET
+      6. Schedule net send at CurTime() + delay.
+]]
+function ENT:EmitSpatialSound( soundPath, originPos, soundLevel, pitch, baseVol )
+    local sendAt = CurTime()
+    for _, ply in ipairs( player.GetAll() ) do
+        if not IsValid(ply) then continue end
+
+        local plyPos  = ply:GetPos()
+        local toPlane = originPos - plyPos
+        local dist    = toPlane:Length()
+
+        if dist > MAX_HEAR_DIST then continue end
+
+        -- Linear volume falloff
+        local vol = baseVol * ( 1 - ( dist / MAX_HEAR_DIST ) )
+        vol = math.Clamp( vol, MIN_VOL, baseVol )
+
+        -- Position the sound NEAR_OFFSET units toward the plane,
+        -- right next to the player so engine attenuation is ~0.
+        local nearPos
+        if dist > 0.1 then
+            nearPos = plyPos + ( toPlane / dist ) * NEAR_OFFSET
+        else
+            nearPos = plyPos
+        end
+
+        -- Acoustic travel delay
+        local delay = dist / SOUND_SPEED
+
+        pending_sounds[ #pending_sounds + 1 ] = {
+            sendTime  = sendAt + delay,
+            ply       = ply,
+            soundPath = soundPath,
+            nearPos   = nearPos,
+            level     = soundLevel,
+            pitch     = pitch,
+            volume    = vol,
+        }
+    end
+end
+
+-- Flush pending sounds in Think so we don't miss any ticks
+local function FlushPendingSounds()
+    if #pending_sounds == 0 then return end
+    local ct    = CurTime()
+    local keep  = {}
+    for _, entry in ipairs( pending_sounds ) do
+        if ct >= entry.sendTime then
+            if IsValid( entry.ply ) then
+                net.Start("bombin_plane_spatial_sound")
+                    net.WriteString ( entry.soundPath )
+                    net.WriteVector ( entry.nearPos   )
+                    net.WriteUInt   ( entry.level, 8  )
+                    net.WriteUInt   ( entry.pitch, 8  )
+                    net.WriteFloat  ( entry.volume    )
+                net.Send( entry.ply )
+            end
+        else
+            keep[ #keep + 1 ] = entry
+        end
+    end
+    pending_sounds = keep
+end
+
+-- ============================================================
+-- ENT DEFINITION
+-- ============================================================
 
 function ENT:Debug(msg)
     print("[Bombin Support Plane ENT] " .. msg)
@@ -159,7 +287,7 @@ function ENT:Initialize()
     if self.PlaneAmbientLoop then self.PlaneAmbientLoop:SetSoundLevel(80) self.PlaneAmbientLoop:Play() end
 
     self.NextSpraySoundTime = 0
-    sound.Play(table.Random(PASS_SOUNDS), self.CenterPos, 75, 100, 0.7)
+    self:EmitSpatialSound( table.Random(PASS_SOUNDS), self:GetPos(), 75, 100, 0.7 )
     self:Debug("Spawned at " .. tostring(spawnPos))
 
     self.CurrentWeapon      = nil
@@ -237,10 +365,19 @@ function ENT:Think()
     if ct >= self.DieTime then self:Remove() return end
     if not IsValid(self.PhysObj) then self.PhysObj = self:GetPhysicsObject() end
     if IsValid(self.PhysObj) and self.PhysObj:IsAsleep() then self.PhysObj:Wake() end
+
     if ct >= self.NextPassSound then
-        sound.Play(table.Random(PASS_SOUNDS), self.CenterPos, 75, math.random(96, 104), 0.7)
+        self:EmitSpatialSound(
+            table.Random(PASS_SOUNDS),
+            self:GetPos(),
+            75,
+            math.random(96, 104),
+            0.7
+        )
         self.NextPassSound = ct + math.Rand(4, 7)
     end
+
+    FlushPendingSounds()
     self:HandleWeaponWindow(ct)
     self:UpdateActiveGAUBursts(ct)
     self:NextThink(ct)
@@ -275,28 +412,30 @@ function ENT:PhysicsUpdate(phys)
     local rawYawDelta = math.NormalizeAngle(currentYaw - (self.PrevYaw or currentYaw))
     self.PrevYaw      = currentYaw
     local targetRoll  = math.Clamp(rawYawDelta * -18, -15, 15)
-    local rollLerp    = rawYawDelta ~= 0 and 0.08 or 0.03
+    local rollLerp    = rawYawDelta ~= 0 and 0.08 or 0.04
     self.SmoothedRoll = Lerp(rollLerp, self.SmoothedRoll, targetRoll)
-    local vel          = IsValid(phys) and phys:GetVelocity() or Vector(0,0,0)
-    local forwardSpeed = vel:Dot(self:GetForward())
-    local speedRatio   = math.Clamp(forwardSpeed / self.Speed, 0, 1)
-    local targetPitch  = math.Clamp(speedRatio * 6, -8, 8)
-    self.SmoothedPitch = Lerp(0.02, self.SmoothedPitch, targetPitch)
-    self.ang.p = self.SmoothedPitch
-    self.ang.r = self.SmoothedRoll
-    self:SetPos(Vector(pos.x, pos.y, liveAlt))
-    self:SetAngles(self.ang)
-    if IsValid(phys) then phys:SetVelocity(self:GetForward() * self.Speed) end
-    if not self:IsInWorld() then self:Debug("Plane moved out of world") self:Remove() end
+    local forward     = self.ang:Forward()
+    local vel         = forward * self.Speed
+    local targetPitch = math.Clamp(-vel.z * 0.02, -8, 8)
+    self.SmoothedPitch = Lerp(0.03, self.SmoothedPitch, targetPitch)
+    local finalAng = Angle(self.SmoothedPitch, self.ang.y, self.SmoothedRoll)
+    phys:SetAngles(finalAng)
+    phys:SetPos(Vector(pos.x + vel.x * engine.TickInterval(),
+                       pos.y + vel.y * engine.TickInterval(),
+                       liveAlt))
+    phys:SetVelocity(vel)
 end
 
 function ENT:HandleWeaponWindow(ct)
-    if not self.CurrentWeapon or ct >= self.WeaponWindowEnd then self:PickNewWeapon(ct) end
-    if self.CurrentWeapon == "25mm"       then self:Update25mmBurstsSchedule(ct)
-    elseif self.CurrentWeapon == "40mm"   then self:Update40mm(ct)
-    elseif self.CurrentWeapon == "105mm"  then self:Update105mm(ct)
+    if not self.CurrentWeapon or ct >= self.WeaponWindowEnd then
+        self:PickNewWeapon(ct)
+        return
+    end
+    if     self.CurrentWeapon == "25mm"       then self:Update25mmBurstsSchedule(ct)
+    elseif self.CurrentWeapon == "40mm"       then self:Update40mm(ct)
+    elseif self.CurrentWeapon == "105mm"      then self:Update105mm(ct)
     elseif self.CurrentWeapon == "25mm_spray" then self:Update25mmSpray(ct)
-    elseif self.CurrentWeapon == "jassm" then self:UpdateJASSM(ct) end
+    elseif self.CurrentWeapon == "jassm"      then self:UpdateJASSM(ct) end
 end
 
 function ENT:PickNewWeapon(ct)
@@ -311,14 +450,13 @@ function ENT:PickNewWeapon(ct)
     self:Debug("Picked weapon: " .. self.CurrentWeapon)
     if self.MuzzleIndexGlobal < 1 or self.MuzzleIndexGlobal > #self.MuzzlePoints then self.MuzzleIndexGlobal = 1 end
     self.MuzzleIndexWeapon = self.MuzzleIndexGlobal
-    self.MuzzleIndexGlobal = self.MuzzleIndexGlobal + 1
-    if self.MuzzleIndexGlobal > #self.MuzzlePoints then self.MuzzleIndexGlobal = 1 end
+
     if self.CurrentWeapon == "25mm" then
-        self.GAU_BurstTimes   = { ct + self.GAU_FirstBurstTime, ct + self.GAU_SecondBurstTime }
-        self.GAU_BurstsFired  = 0
+        self.GAU_BurstTimes  = { ct + self.GAU_FirstBurstTime, ct + self.GAU_SecondBurstTime }
+        self.GAU_BurstsFired = 0
         self.GAU_ActiveBursts = {}
     elseif self.CurrentWeapon == "40mm" then
-        self.NextShotTime40 = ct
+        self.NextShotTime40 = ct + 0.3
     elseif self.CurrentWeapon == "105mm" then
         self.NextShotTime105 = ct + 0.5
     elseif self.CurrentWeapon == "25mm_spray" then
@@ -331,8 +469,6 @@ function ENT:PickNewWeapon(ct)
         sweepDir:Normalize()
         self.GAU_SweepStartPos = targetPos - sweepDir * self.GAU_SweepHalfLength
         self.GAU_SweepEndPos   = targetPos + sweepDir * self.GAU_SweepHalfLength
-    elseif self.CurrentWeapon == "jassm" then
-        self.JASSM_Fired = false
     end
 end
 
@@ -340,7 +476,13 @@ function ENT:StartSprayLoop(soundPath) self.NextSpraySoundTime = CurTime() end
 function ENT:StopSprayLoop() self.NextSpraySoundTime = 0 end
 
 function ENT:PlaySpraySoundAndFlash(ct)
-    sound.Play(table.Random(GAU_BRRT_SOUNDS), self.CenterPos, 110, math.random(96, 104), 1.0)
+    self:EmitSpatialSound(
+        table.Random(GAU_BRRT_SOUNDS),
+        self:GetPos(),
+        75,
+        math.random(96, 104),
+        1.0
+    )
     self:SpawnWeaponMuzzleFX("cball_explode", 1)
     self.NextSpraySoundTime = ct + self.GAU_SpraySoundDelay
 end
@@ -442,7 +584,13 @@ function ENT:StartGAUBurst()
     self.GAU_SweepEndPos   = targetPos + sweepDir * self.GAU_SweepHalfLength
     table.insert(self.GAU_ActiveBursts, { bulletsFired = 0, nextTime = CurTime() })
     self:SpawnWeaponMuzzleFX("cball_explode", 1)
-    sound.Play(table.Random(GAU_BRRT_SOUNDS), self.CenterPos, 110, math.random(96, 104), 1.0)
+    self:EmitSpatialSound(
+        table.Random(GAU_BRRT_SOUNDS),
+        self:GetPos(),
+        75,
+        math.random(96, 104),
+        1.0
+    )
 end
 
 function ENT:UpdateActiveGAUBursts(ct)
@@ -519,7 +667,13 @@ function ENT:Update40mm(ct)
         end
     end
     self:SpawnWeaponMuzzleFX("cball_explode", 2)
-    sound.Play("killstreak_rewards/ac-130_40mm_fire.wav", self.CenterPos, 110, math.random(96, 104), 1.0)
+    self:EmitSpatialSound(
+        "killstreak_rewards/ac-130_40mm_fire.wav",
+        self:GetPos(),
+        75,
+        math.random(96, 104),
+        1.0
+    )
 end
 
 function ENT:Spawn105mmEffects(pos)
@@ -556,13 +710,7 @@ function ENT:Update105mm(ct)
             shell.OnExplode = function(s, pos, normal)
                 if simfphys and not simfphys.IsCar then simfphys.IsCar = function() return false end end
                 if oldExplode then oldExplode(s, pos, normal) end
-                plane:Spawn105mmEffects(pos or s:GetPos())
-            end
-            local oldImpact = shell.OnImpact
-            shell.OnImpact = function(s, pos, normal)
-                if simfphys and not simfphys.IsCar then simfphys.IsCar = function() return false end end
-                if oldImpact then oldImpact(s, pos, normal) end
-                plane:Spawn105mmEffects(pos or s:GetPos())
+                if IsValid(plane) then plane:Spawn105mmEffects(pos) end
             end
         end
     else
@@ -574,7 +722,13 @@ function ENT:Update105mm(ct)
         end
     end
     self:SpawnWeaponMuzzleFX("cball_explode", 3)
-    sound.Play("killstreak_rewards/ac-130_105mm_fire.wav", self.CenterPos, 110, math.random(96, 104), 1.0)
+    self:EmitSpatialSound(
+        "killstreak_rewards/ac-130_105mm_fire.wav",
+        self:GetPos(),
+        75,
+        math.random(96, 104),
+        1.0
+    )
 end
 
 function ENT:UpdateJASSM(ct)
@@ -631,4 +785,5 @@ function ENT:OnRemove()
     if self.IdleLoop then self.IdleLoop:Stop() end
     if self.PlaneAmbientLoop then self.PlaneAmbientLoop:Stop() end
     if not self.IsDestroyed then self:StopSprayLoop() end
+    pending_sounds = {}
 end
