@@ -254,7 +254,7 @@ function ENT:Initialize()
 
     self.PlaneAmbientLoop = CreateSound(self, self.Plane_Ambient_SoundPath)
     if self.PlaneAmbientLoop then
-        self.PlaneAmbientLoop:SetSoundLevel(80)
+        self.PlaneAmbientLoop:SetSoundLevel(120)
         self.PlaneAmbientLoop:Play()
     end
 
