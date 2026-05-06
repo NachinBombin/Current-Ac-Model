@@ -3,14 +3,14 @@ AddCSLuaFile()
 TRAJ_GAU = {
     -- Ballistics
     damage             = 35,
-    speed              = 85000,
+    speed              = 76000,
     penetration_power  = 15.0,
     penetration_count  = 3,
     drag               = 0.0,
     mass               = 0.02,
     drop               = 0.0,
     min_speed          = 200,
-    max_distance       = 22000,
+    max_distance       = 35000,
     damage_force_mul   = 5.0,
 
     -- Buffer
