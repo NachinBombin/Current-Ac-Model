@@ -25,34 +25,27 @@ local GAU_BRRT_SOUNDS = {
     "gunsounds/brrt_04.wav",
 }
 
+local SOUND_105_IMPACT = "killstreak_explosions/105_explosion.wav"
+
 -- ============================================================
 -- SPATIAL PER-PLAYER SOUND SYSTEM
--- Speed of sound in GMod units: 8200 u/s.
---
--- All weapon sounds emit from self.CenterPos (ground target),
--- not self:GetPos() (sky), so distance/delay is grounded.
---
--- soundLevel 150 = Source audible radius ~15 000 u.
---
--- Volume falloff (near-zero / almost flat):
---   vol = baseVol * (1 - dist/MAX_HEAR_DIST) ^ VOL_FALLOFF_EXP
---   VOL_FALLOFF_EXP = 0.01  ->  essentially flat across the map.
 -- ============================================================
 
 util.AddNetworkString("bombin_plane_damage_tier")
 util.AddNetworkString("bombin_plane_spatial_sound")
-util.AddNetworkString("bombin_plane_ambient_loop")  -- tells each client to start the ambient loop
+util.AddNetworkString("bombin_105mm_impact")
 
 local SOUND_SPEED     = 8200
 local MAX_HEAR_DIST   = 88000
 local VOL_FALLOFF_EXP = 0.01
 local NEAR_OFFSET     = 40
-local WEAPON_LEVEL    = 150   -- Source radius ~15 000 u; audible from sky origin
+local WEAPON_LEVEL    = 150
 
 local function PrecacheWeaponSounds()
     for _, s in ipairs(GAU_BRRT_SOUNDS) do util.PrecacheSound(s) end
     util.PrecacheSound("killstreak_rewards/ac-130_40mm_fire.wav")
     util.PrecacheSound("killstreak_rewards/ac-130_105mm_fire.wav")
+    util.PrecacheSound(SOUND_105_IMPACT)
 end
 PrecacheWeaponSounds()
 
@@ -213,6 +206,10 @@ function ENT:Initialize()
     self:SetNWInt("HP",    self.MaxHP)
     self:SetNWInt("MaxHP", self.MaxHP)
 
+    -- AmbientLoopActive: client reads this in InitializeOnClient, which fires
+    -- after the entity is fully networked. No timing race possible.
+    self:SetNWBool("AmbientLoopActive", true)
+
     local ang = self.CallDir:Angle()
     self:SetAngles(Angle(0, ang.y - 90, 0))
     self.ang = self:GetAngles()
@@ -235,19 +232,8 @@ function ENT:Initialize()
         self.PhysObj:EnableGravity(false)
     end
 
-    -- IdleLoop: interior cabin audio, server CreateSound is fine at close range
     self.IdleLoop = CreateSound(self, "ac-130_kill_sounds/AC130_idle_inside.mp3")
     if self.IdleLoop then self.IdleLoop:SetSoundLevel(60) self.IdleLoop:Play() end
-
-    -- Ambient engine loop: broadcast to all clients so each creates their own
-    -- local CSoundPatch against the entity, bypassing sky-distance culling.
-    local entIdx = self:EntIndex()
-    local sndPath = self.Plane_Ambient_SoundPath
-    net.Start("bombin_plane_ambient_loop")
-        net.WriteUInt  ( entIdx,  16 )
-        net.WriteString( sndPath     )
-        net.WriteBool  ( true        )  -- true = start
-    net.Broadcast()
 
     self:Debug("Spawned at " .. tostring(spawnPos))
 
@@ -308,12 +294,7 @@ function ENT:DestroyPlane()
     self.IsDestroyed = true
     if self.IdleLoop then self.IdleLoop:Stop() end
     self:StopSprayLoop()
-    -- Tell clients to stop the ambient loop
-    net.Start("bombin_plane_ambient_loop")
-        net.WriteUInt  ( self:EntIndex(), 16 )
-        net.WriteString( self.Plane_Ambient_SoundPath )
-        net.WriteBool  ( false )  -- false = stop
-    net.Broadcast()
+    self:SetNWBool("AmbientLoopActive", false)
     self:BroadcastDamageTier(0)
     local pos = self.LastPos or self:GetPos()
     local ed1 = EffectData() ed1:SetOrigin(pos) ed1:SetScale(6) ed1:SetMagnitude(6) ed1:SetRadius(600) util.Effect("HelicopterMegaBomb", ed1, true, true)
@@ -666,7 +647,17 @@ function ENT:Update105mm(ct)
             shell.OnExplode = function(s, pos, normal)
                 if simfphys and not simfphys.IsCar then simfphys.IsCar = function() return false end end
                 if oldExplode then oldExplode(s, pos, normal) end
-                if IsValid(plane) then plane:Spawn105mmEffects(pos) end
+                if IsValid(plane) then
+                    plane:Spawn105mmEffects(pos)
+                    -- Impact sound: spatial, originates at the blast position on the ground
+                    plane:EmitSpatialSound(
+                        SOUND_105_IMPACT,
+                        pos,
+                        WEAPON_LEVEL,
+                        math.random(96, 104),
+                        1.0
+                    )
+                end
             end
         end
     else
@@ -741,12 +732,7 @@ function ENT:OnRemove()
     if self.IdleLoop then self.IdleLoop:Stop() end
     if not self.IsDestroyed then
         self:StopSprayLoop()
-        -- Stop ambient loop on all clients on natural removal
-        net.Start("bombin_plane_ambient_loop")
-            net.WriteUInt  ( self:EntIndex(), 16 )
-            net.WriteString( self.Plane_Ambient_SoundPath )
-            net.WriteBool  ( false )
-        net.Broadcast()
+        self:SetNWBool("AmbientLoopActive", false)
     end
     pending_sounds = {}
 end

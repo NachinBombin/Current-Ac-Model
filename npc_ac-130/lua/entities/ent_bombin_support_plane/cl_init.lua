@@ -8,9 +8,8 @@ game.AddParticles("particles/fire_01.pcf")
 PrecacheParticleSystem("fire_medium_02")
 
 -- ============================================================
--- SOUND BROADCAST
--- bombin_plane_spatial_sound: per-player weapon sounds routed
--- through the spatial delay system on the server.
+-- WEAPON SOUNDS
+-- bombin_plane_spatial_sound: per-player weapon sounds from server.
 -- ============================================================
 local function HandlePlaneSound()
     local path   = net.ReadString()
@@ -26,49 +25,31 @@ net.Receive("bombin_plane_spatial_sound", HandlePlaneSound)
 
 -- ============================================================
 -- AMBIENT ENGINE LOOP
--- The server broadcasts bombin_plane_ambient_loop on spawn and
--- removal. Each client creates/stops its own CSoundPatch
--- attached to the entity locally, which means Source's audio
--- engine handles 3D positioning correctly without sky-distance
--- culling killing the sound before it reaches the listener.
+-- Server sets NWBool "AmbientLoopActive" = true on Initialize.
+-- ENT:InitializeOnClient() fires only after the entity is
+-- fully networked to this client, so there is zero timing race.
+-- NWBool is set to false on DestroyPlane / OnRemove, which
+-- triggers the NWVarProxy below to stop the loop.
 -- ============================================================
 local AmbientLoops = {}  -- [entIndex] = CSoundPatch
 
-net.Receive("bombin_plane_ambient_loop", function()
-    local entIndex = net.ReadUInt(16)
-    local sndPath  = net.ReadString()
-    local shouldPlay = net.ReadBool()
-
-    if shouldPlay then
-        local ent = Entity(entIndex)
-        -- Entity may not be networked to this client yet; defer until valid
-        if not IsValid(ent) then
-            timer.Simple(0.5, function()
-                local e = Entity(entIndex)
-                if not IsValid(e) then return end
-                local snd = CreateSound(e, sndPath)
-                if snd then
-                    snd:SetSoundLevel(80)
-                    snd:Play()
-                    AmbientLoops[entIndex] = snd
-                end
-            end)
-        else
-            local snd = CreateSound(ent, sndPath)
-            if snd then
-                snd:SetSoundLevel(80)
-                snd:Play()
-                AmbientLoops[entIndex] = snd
-            end
-        end
-    else
-        local snd = AmbientLoops[entIndex]
-        if snd then
-            snd:Stop()
-            AmbientLoops[entIndex] = nil
-        end
+function ENT:InitializeOnClient()
+    if not self:GetNWBool("AmbientLoopActive", false) then return end
+    local snd = CreateSound(self, self.Plane_Ambient_SoundPath)
+    if snd then
+        snd:SetSoundLevel(80)
+        snd:Play()
+        AmbientLoops[self:EntIndex()] = snd
     end
-end)
+end
+
+function ENT:OnRemove()
+    local snd = AmbientLoops[self:EntIndex()]
+    if snd then
+        snd:Stop()
+        AmbientLoops[self:EntIndex()] = nil
+    end
+end
 
 -- ============================================================
 -- DAMAGE TIERS
