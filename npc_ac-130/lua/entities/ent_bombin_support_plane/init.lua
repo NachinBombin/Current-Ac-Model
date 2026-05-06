@@ -174,6 +174,10 @@ ENT.GUN105_Scatter       = 400
 
 ENT.GAU_Spray_Delay      = 0.033
 
+-- How long (seconds) bullets STOP firing between each burst in spray mode.
+-- The firing window per burst = GAU_SpraySoundDelay - GAU_SprayPauseDuration.
+ENT.GAU_SprayPauseDuration = 0.6
+
 ENT.MuzzleForwardOffset  = 250
 ENT.MuzzleSideOffset     = -60
 ENT.Plane_Ambient_SoundPath = "ac/bomber_engine_high.wav"
@@ -272,6 +276,7 @@ function ENT:Initialize()
     self.NextShotTimeSpray  = 0
     self.NextSpraySoundTime = 0
     self.SprayBulletCount   = 0
+    self.GAU_SprayBurstEnd  = 0  -- time when the current spray burst's bullet window closes
     self.GAU_BurstTimes     = {}
     self.GAU_BurstsFired    = 0
     self.GAU_ActiveBursts   = {}
@@ -476,6 +481,7 @@ function ENT:ArmWeapon(weapon, ct)
         self.NextShotTimeSpray  = ct
         self.NextSpraySoundTime = ct
         self.SprayBulletCount   = 0
+        self.GAU_SprayBurstEnd  = 0  -- no bullet window open yet; first burst opens it immediately
         local targetPos = self:GetTargetGroundPos()
         local sweepDir  = Vector(math.Rand(-1,1), math.Rand(-1,1), 0)
         if sweepDir:LengthSqr() < 0.01 then sweepDir = Vector(1,0,0) end
@@ -497,7 +503,10 @@ end
 -- ============================================================
 
 function ENT:StartSprayLoop(soundPath) self.NextSpraySoundTime = CurTime() end
-function ENT:StopSprayLoop() self.NextSpraySoundTime = 0 end
+function ENT:StopSprayLoop()
+    self.NextSpraySoundTime = 0
+    self.GAU_SprayBurstEnd  = 0
+end
 
 function ENT:PlaySpraySoundAndFlash(ct)
     self:EmitSpatialSound(
@@ -508,6 +517,11 @@ function ENT:PlaySpraySoundAndFlash(ct)
         1.0
     )
     self:SpawnWeaponMuzzleFX("cball_explode", 1)
+    -- Open a bullet-firing window for (GAU_SpraySoundDelay - GAU_SprayPauseDuration) seconds.
+    -- Bullets are silenced for the remaining GAU_SprayPauseDuration seconds until the next burst.
+    local fireDuration = self.GAU_SpraySoundDelay - self.GAU_SprayPauseDuration
+    self.GAU_SprayBurstEnd  = ct + fireDuration
+    self.NextShotTimeSpray  = ct  -- allow bullets to start immediately this tick
     self.NextSpraySoundTime = ct + self.GAU_SpraySoundDelay
 end
 
@@ -649,8 +663,18 @@ end
 
 function ENT:Update25mmSpray(ct)
     if ct >= self.WeaponWindowEnd then self:StopSprayLoop() return end
-    if self.NextSpraySoundTime > 0 and ct >= self.NextSpraySoundTime then self:PlaySpraySoundAndFlash(ct) end
+
+    -- Sound + muzzle flash tick: fires every GAU_SpraySoundDelay seconds.
+    -- PlaySpraySoundAndFlash also opens the bullet window (sets GAU_SprayBurstEnd).
+    if self.NextSpraySoundTime > 0 and ct >= self.NextSpraySoundTime then
+        self:PlaySpraySoundAndFlash(ct)
+    end
+
+    -- Bullet gate: only fire while inside the current burst's active window.
+    -- Outside that window (the 0.6s pause) bullets are suppressed entirely.
+    if ct >= (self.GAU_SprayBurstEnd or 0) then return end
     if ct < self.NextShotTimeSpray then return end
+
     self.NextShotTimeSpray = ct + self.GAU_Spray_Delay
     self.SprayBulletCount  = self.SprayBulletCount + 1
     local targetPos   = self:GetTargetGroundPos()
