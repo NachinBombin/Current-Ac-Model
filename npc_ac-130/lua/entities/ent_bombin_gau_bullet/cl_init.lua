@@ -32,10 +32,18 @@ if #bombin_gau_store.buffer == 0 then
     end
 end
 
--- ─── Passby logic ────────────────────────────────────────────────────────────────
--- GAUEmitSound and the gau_passby_* sound.Add aliases are defined in
--- cl_gau_passby_sounds.lua (autorun/client), which loads before entities.
--- This file has zero dependency on the RBO addon.
+-- ─── Passby logic ─────────────────────────────────────────────────────────────
+-- GAUEmitSound and gau_passby_* aliases are in cl_gau_passby_sounds.lua.
+-- Zero dependency on the RBO addon.
+--
+-- Crossing detection (corrected):
+--   sign(old_pos) = dot( dir, normalize(listener - old_pos) )
+--     > 0  →  listener is AHEAD  of bullet's old position  (bullet hasn't passed yet)
+--     ≤ 0  →  listener is BEHIND of bullet's old position  (bullet already past)
+--
+--   We want a crossing event: old_pos had listener ahead (sign > 0),
+--   and new pos has listener behind (sign ≤ 0).  That means the bullet
+--   swept past the listener's lateral plane THIS tick.
 
 local GAU_PASSBY_COOLDOWN     = 0.22
 local GAU_MAX_CONSIDER_DISTSQ = 4000 * 4000
@@ -58,25 +66,28 @@ local function gau_passby_emit(distance, position)
     end
 end
 
-local function sign_check(p1, p2, dir)
-    local dif = p2 - p1
-    dif:Normalize()
-    return dir:Dot(dif)
+-- Returns dot( dir, normalize(listener - bullet_pos) ).
+-- Positive = listener is ahead of the bullet. Negative = bullet has passed.
+local function lateral_sign(bullet_pos, listener_pos, dir)
+    local d = listener_pos - bullet_pos
+    d:Normalize()
+    return dir:Dot(d)
 end
 
 local function gau_check_passby(proj)
-    if proj.gau_wizz then return end
+    -- Skip first tick: old_pos == pos means no real segment yet.
+    if proj.distance_traveled == 0 then return end
 
     local listener = LocalPlayer()
     if not IsValid(listener) then return end
 
-    -- Suppress if we are aboard the plane (view entity is not a player).
+    -- Suppress while riding the plane (view entity is not a player).
     local view_ent = GetViewEntity()
     if IsValid(view_ent) and not view_ent:IsPlayer() then return end
 
     local listen_pos = listener:EyePos()
 
-    -- Broad-phase: skip bullets whose midpoint is beyond consideration range.
+    -- Broad-phase: cheap squared-distance cull on the segment midpoint.
     local mid_x = (proj.old_pos.x + proj.pos.x) * 0.5
     local mid_y = (proj.old_pos.y + proj.pos.y) * 0.5
     local mid_z = (proj.old_pos.z + proj.pos.z) * 0.5
@@ -85,29 +96,40 @@ local function gau_check_passby(proj)
     local dz = listen_pos.z - mid_z
     if (dx*dx + dy*dy + dz*dz) > GAU_MAX_CONSIDER_DISTSQ then return end
 
-    local vn = proj.vel:GetNormalized()
+    local vn = proj.dir  -- already a unit vector; dir never changes per-projectile
 
-    -- Bullet hasn't reached the listener's lateral plane yet.
-    if sign_check(proj.old_pos, listen_pos, vn) > 0 then return end
+    -- Crossing condition:
+    --   last tick: listener was AHEAD  (sign_old > 0)
+    --   this tick: listener is BEHIND  (sign_new ≤ 0)
+    local sign_old = lateral_sign(proj.old_pos, listen_pos, vn)
+    local sign_new = lateral_sign(proj.pos,     listen_pos, vn)
 
-    -- Both endpoints behind the listener: bullet already passed, done.
-    if sign_check(proj.pos, listen_pos, vn) <= 0 then
+    if sign_old <= 0 then
+        -- Listener was already behind old_pos — bullet spawned past us or we moved.
+        -- Mark as done so we stop checking every tick.
         proj.gau_wizz = true
         return
     end
 
-    local dist, closest_pos = util.DistanceToLine(proj.old_pos, proj.pos, listen_pos)
+    if sign_new > 0 then
+        -- Listener still ahead this tick — crossing hasn't happened yet.
+        return
+    end
 
-    proj.gau_wizz = true
+    -- ── Crossing confirmed this tick ──────────────────────────────────────────
+    proj.gau_wizz = true  -- only ever whizz once per bullet slot
 
+    -- Global cooldown: hard cap on concurrent passby spam from burst fire.
     local now = UnPredictedCurTime()
     if (now - gau_passby_last_time) < GAU_PASSBY_COOLDOWN then return end
     gau_passby_last_time = now
 
+    -- Closest-approach distance + world position along the old→new segment.
+    local dist, closest_pos = util.DistanceToLine(proj.old_pos, proj.pos, listen_pos)
     gau_passby_emit(dist, closest_pos)
 end
 
--- ─── Net receive ─────────────────────────────────────────────────────────────
+-- ─── Net receive ──────────────────────────────────────────────────────────────
 
 net.Receive("bombin_gau_projectile", function()
     local pos = net.ReadVector()
@@ -134,7 +156,7 @@ net.Receive("bombin_gau_projectile", function()
     store.active_projectiles[#store.active_projectiles + 1] = proj
 end)
 
--- ─── Movement + passby tick ──────────────────────────────────────────────────
+-- ─── Movement + passby tick ───────────────────────────────────────────────────
 
 local tick_interval = engine.TickInterval()
 local last_tick     = engine.TickCount()
@@ -158,6 +180,8 @@ local function move_cl()
             proj.pos      = new_pos
             proj.distance_traveled = proj.distance_traveled + step:Length()
 
+            -- Passby check runs after pos/old_pos are updated for this tick.
+            -- gau_wizz short-circuits after first confirmed crossing.
             if not proj.gau_wizz then
                 gau_check_passby(proj)
             end
@@ -175,7 +199,7 @@ hook.Add("CreateMove", "bombin_gau_move_cl", function()
     end
 end)
 
--- ─── Renderer ────────────────────────────────────────────────────────────────
+-- ─── Renderer ─────────────────────────────────────────────────────────────────
 
 local function render_projectiles()
     local active = bombin_gau_store.active_projectiles
