@@ -28,12 +28,6 @@ local GAU_BRRT_SOUNDS = {
 local SOUND_105_IMPACT = "killstreak_explosions/105_explosion.wav"
 
 -- ============================================================
--- PEACEFUL MODE CONFIG
--- ============================================================
-local CFG_PeacefulMin = 3
-local CFG_PeacefulMax = 5
-
--- ============================================================
 -- SPATIAL PER-PLAYER SOUND SYSTEM
 -- ============================================================
 
@@ -113,6 +107,37 @@ local function FlushPendingSounds()
     end
     pending_sounds = keep
 end
+
+-- ============================================================
+-- 105mm SHELL IMPACT TRACKING
+--
+-- Gred shells do not expose an OnExplode callback. Instead we
+-- store every spawned 105mm shell reference in a weak table.
+-- hook.Add("EntityRemoved") fires server-side the frame before
+-- the entity is deleted. At that point shell:GetPos() is still
+-- valid and equals the blast position (Gred removes shells at
+-- the impact point). We capture that position and emit the
+-- impact sound spatially.
+-- ============================================================
+local Shells105 = {}  -- [entIndex] = { plane = planeEnt, lastPos = Vector }
+
+hook.Add("EntityRemoved", "bombin_105mm_shell_sound", function(ent)
+    if not IsValid(ent) then return end
+    local data = Shells105[ent:EntIndex()]
+    if not data then return end
+    local plane = data.plane
+    local pos   = ent:GetPos()  -- blast position: still valid in EntityRemoved
+    Shells105[ent:EntIndex()] = nil
+    if IsValid(plane) then
+        plane:EmitSpatialSound(
+            SOUND_105_IMPACT,
+            pos,
+            WEAPON_LEVEL,
+            math.random(96, 104),
+            1.0
+        )
+    end
+end)
 
 -- ============================================================
 -- ENT DEFINITION
@@ -211,9 +236,7 @@ function ENT:Initialize()
 
     self:SetNWInt("HP",    self.MaxHP)
     self:SetNWInt("MaxHP", self.MaxHP)
-
-    -- AmbientLoopActive: client reads this in InitializeOnClient, which fires
-    -- after the entity is fully networked. No timing race possible.
+    -- AmbientLoopActive: read client-side in OnEntityCreated hook (cl_init.lua).
     self:SetNWBool("AmbientLoopActive", true)
 
     local ang = self.CallDir:Angle()
@@ -260,10 +283,8 @@ function ENT:Initialize()
     self.IsDestroyed        = false
     self.DamageTier         = 0
     self.JASSM_DeployCount  = 0
-
-    -- Peaceful mode state
-    self.IsPeaceful    = false
-    self.PeacefulUntil = 0
+    self.IsPeaceful         = false
+    self.PeacefulUntil      = 0
 
     if not HasGred() then self:Debug("WARNING: Gred base not found; falling back to rpg_missile.") end
 end
@@ -373,58 +394,40 @@ function ENT:PhysicsUpdate(phys)
     phys:SetVelocity(vel)
 end
 
--- ============================================================
--- PEACEFUL MODE
--- ============================================================
-
--- EnterPeaceful: called at the END of every weapon window.
--- Suppresses all firing for a random 3–5 second window, then
--- arms the next weapon via timer.Simple (same pattern as B-52).
-function ENT:EnterPeaceful(ct)
-    self:StopSprayLoop()
-    self.IsPeaceful    = true
-    self.PeacefulUntil = ct + math.Rand(CFG_PeacefulMin, CFG_PeacefulMax)
-    self.CurrentWeapon = nil
-
-    -- Pick the next weapon now so it is decided before the timer fires.
-    local roll = math.random(1, 5)
-    local choice
-    if     roll == 1 then choice = "25mm"
-    elseif roll == 2 then choice = "40mm"
-    elseif roll == 3 then choice = "105mm"
-    elseif roll == 4 then choice = "25mm_spray"
-    else                   choice = "jassm" end
-
-    self:Debug("Peaceful until +" .. string.format("%.1f", self.PeacefulUntil - ct) .. "s, next=" .. choice)
-
-    timer.Simple(self.PeacefulUntil - ct, function()
-        if not IsValid(self) or self.IsDestroyed then return end
-        self.IsPeaceful   = false
-        self:ArmWeapon(choice, CurTime())
-    end)
+function ENT:HandleWeaponWindow(ct)
+    if not self.CurrentWeapon or ct >= self.WeaponWindowEnd then
+        self:PickNewWeapon(ct)
+        return
+    end
+    if     self.CurrentWeapon == "25mm"       then self:Update25mmBurstsSchedule(ct)
+    elseif self.CurrentWeapon == "40mm"       then self:Update40mm(ct)
+    elseif self.CurrentWeapon == "105mm"      then self:Update105mm(ct)
+    elseif self.CurrentWeapon == "25mm_spray" then self:Update25mmSpray(ct)
+    elseif self.CurrentWeapon == "jassm"      then self:UpdateJASSM(ct) end
 end
 
--- ArmWeapon: sets all per-weapon state and opens the fire window.
--- Extracted from PickNewWeapon so EnterPeaceful can call it after the delay.
-function ENT:ArmWeapon(choice, ct)
-    self.CurrentWeapon   = choice
+function ENT:PickNewWeapon(ct)
+    self:StopSprayLoop()
+    local roll = math.random(1, 5)
+    if     roll == 1 then self.CurrentWeapon = "25mm"
+    elseif roll == 2 then self.CurrentWeapon = "40mm"
+    elseif roll == 3 then self.CurrentWeapon = "105mm"
+    elseif roll == 4 then self.CurrentWeapon = "25mm_spray"
+    else                   self.CurrentWeapon = "jassm" end
     self.WeaponWindowEnd = ct + self.WeaponWindow
-    self:Debug("Armed: " .. self.CurrentWeapon)
-
-    if self.MuzzleIndexGlobal < 1 or self.MuzzleIndexGlobal > #self.MuzzlePoints then
-        self.MuzzleIndexGlobal = 1
-    end
+    self:Debug("Picked weapon: " .. self.CurrentWeapon)
+    if self.MuzzleIndexGlobal < 1 or self.MuzzleIndexGlobal > #self.MuzzlePoints then self.MuzzleIndexGlobal = 1 end
     self.MuzzleIndexWeapon = self.MuzzleIndexGlobal
 
-    if choice == "25mm" then
-        self.GAU_BurstTimes   = { ct + self.GAU_FirstBurstTime, ct + self.GAU_SecondBurstTime }
-        self.GAU_BurstsFired  = 0
+    if self.CurrentWeapon == "25mm" then
+        self.GAU_BurstTimes  = { ct + self.GAU_FirstBurstTime, ct + self.GAU_SecondBurstTime }
+        self.GAU_BurstsFired = 0
         self.GAU_ActiveBursts = {}
-    elseif choice == "40mm" then
+    elseif self.CurrentWeapon == "40mm" then
         self.NextShotTime40 = ct + 0.3
-    elseif choice == "105mm" then
+    elseif self.CurrentWeapon == "105mm" then
         self.NextShotTime105 = ct + 0.5
-    elseif choice == "25mm_spray" then
+    elseif self.CurrentWeapon == "25mm_spray" then
         self.NextShotTimeSpray  = ct
         self.NextSpraySoundTime = ct
         self.SprayBulletCount   = 0
@@ -434,53 +437,7 @@ function ENT:ArmWeapon(choice, ct)
         sweepDir:Normalize()
         self.GAU_SweepStartPos = targetPos - sweepDir * self.GAU_SweepHalfLength
         self.GAU_SweepEndPos   = targetPos + sweepDir * self.GAU_SweepHalfLength
-    elseif choice == "jassm" then
-        self.JASSM_Fired = false
     end
-end
-
--- ============================================================
--- WEAPON WINDOW DISPATCHER
--- ============================================================
-
-function ENT:HandleWeaponWindow(ct)
-    -- Still in peaceful cooldown — do nothing.
-    if self.IsPeaceful then return end
-
-    -- No weapon yet (first call, or timer race guard) → arm immediately.
-    if not self.CurrentWeapon then
-        self:ArmWeapon(self:RollNewWeapon(), ct)
-        return
-    end
-
-    -- Weapon window expired → enter peaceful cooldown.
-    if ct >= self.WeaponWindowEnd then
-        self:EnterPeaceful(ct)
-        return
-    end
-
-    -- Active fire window — dispatch to the weapon updater.
-    if     self.CurrentWeapon == "25mm"       then self:Update25mmBurstsSchedule(ct)
-    elseif self.CurrentWeapon == "40mm"       then self:Update40mm(ct)
-    elseif self.CurrentWeapon == "105mm"      then self:Update105mm(ct)
-    elseif self.CurrentWeapon == "25mm_spray" then self:Update25mmSpray(ct)
-    elseif self.CurrentWeapon == "jassm"      then self:UpdateJASSM(ct) end
-end
-
--- RollNewWeapon: pure helper, returns a weapon string without touching state.
-function ENT:RollNewWeapon()
-    local roll = math.random(1, 5)
-    if     roll == 1 then return "25mm"
-    elseif roll == 2 then return "40mm"
-    elseif roll == 3 then return "105mm"
-    elseif roll == 4 then return "25mm_spray"
-    else                   return "jassm" end
-end
-
--- PickNewWeapon kept for back-compat (any external caller that may reference it).
--- Now simply delegates to EnterPeaceful.
-function ENT:PickNewWeapon(ct)
-    self:EnterPeaceful(ct)
 end
 
 function ENT:StartSprayLoop(soundPath) self.NextSpraySoundTime = CurTime() end
@@ -714,25 +671,12 @@ function ENT:Update105mm(ct)
             shell.Shocktime = 8 shell.ShockForce = 1200
             shell.DEFAULT_PHYSFORCE_PLYGROUND = 1500
             shell.DEFAULT_PHYSFORCE_PLYAIR    = 80
+            -- Register this shell for EntityRemoved impact sound tracking
+            local shellIdx = shell:EntIndex()
+            local plane    = self
+            Shells105[shellIdx] = { plane = plane }
             local phys = shell:GetPhysicsObject()
             if IsValid(phys) then phys:EnableGravity(true) phys:SetVelocity(dir * self.GUN105_ShellVelocity) end
-            local plane = self
-            local oldExplode = shell.OnExplode
-            shell.OnExplode = function(s, pos, normal)
-                if simfphys and not simfphys.IsCar then simfphys.IsCar = function() return false end end
-                if oldExplode then oldExplode(s, pos, normal) end
-                if IsValid(plane) then
-                    plane:Spawn105mmEffects(pos)
-                    -- Impact sound: spatial, originates at the blast position on the ground
-                    plane:EmitSpatialSound(
-                        SOUND_105_IMPACT,
-                        pos,
-                        WEAPON_LEVEL,
-                        math.random(96, 104),
-                        1.0
-                    )
-                end
-            end
         end
     else
         local m = ents.Create("rpg_missile")

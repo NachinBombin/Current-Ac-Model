@@ -25,23 +25,36 @@ net.Receive("bombin_plane_spatial_sound", HandlePlaneSound)
 
 -- ============================================================
 -- AMBIENT ENGINE LOOP
--- Server sets NWBool "AmbientLoopActive" = true on Initialize.
--- ENT:InitializeOnClient() fires only after the entity is
--- fully networked to this client, so there is zero timing race.
--- NWBool is set to false on DestroyPlane / OnRemove, which
--- triggers the NWVarProxy below to stop the loop.
+--
+-- ENT:InitializeOnClient() does NOT exist in GMod's SENT system.
+-- The correct approach: hook OnEntityCreated, which fires the same
+-- frame the entity becomes valid on the client, with all NWVars
+-- already populated (unlike net messages sent during Initialize).
+--
+-- Server sets NWBool "AmbientLoopActive" = true in Initialize().
+-- ENT:OnRemove() (real callback) stops the loop on removal.
 -- ============================================================
 local AmbientLoops = {}  -- [entIndex] = CSoundPatch
 
-function ENT:InitializeOnClient()
-    if not self:GetNWBool("AmbientLoopActive", false) then return end
-    local snd = CreateSound(self, self.Plane_Ambient_SoundPath)
-    if snd then
-        snd:SetSoundLevel(80)
-        snd:Play()
-        AmbientLoops[self:EntIndex()] = snd
-    end
-end
+hook.Add("OnEntityCreated", "bombin_plane_ambient_loop", function(ent)
+    if not IsValid(ent) then return end
+    if ent:GetClass() ~= "ent_bombin_support_plane" then return end
+
+    -- Defer one frame so the entity finishes its own Initialize pass
+    -- and NWBool is guaranteed to have propagated.
+    timer.Simple(0, function()
+        if not IsValid(ent) then return end
+        if not ent:GetNWBool("AmbientLoopActive", false) then return end
+        local idx = ent:EntIndex()
+        if AmbientLoops[idx] then return end  -- already running
+        local snd = CreateSound(ent, ent.Plane_Ambient_SoundPath)
+        if snd then
+            snd:SetSoundLevel(80)
+            snd:Play()
+            AmbientLoops[idx] = snd
+        end
+    end)
+end)
 
 function ENT:OnRemove()
     local snd = AmbientLoops[self:EntIndex()]
