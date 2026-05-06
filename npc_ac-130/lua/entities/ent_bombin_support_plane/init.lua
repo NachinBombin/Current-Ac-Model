@@ -1,6 +1,5 @@
 AddCSLuaFile("cl_init.lua")
 AddCSLuaFile("shared.lua")
-AddCSLuaFile("cl_jassm_hud.lua")
 include("shared.lua")
 
 local function HasGred()
@@ -237,12 +236,8 @@ function ENT:Initialize()
     self:SetPos(spawnPos)
     self.LastPos = spawnPos
 
-    self:SetNWInt("HP",         self.MaxHP)
-    self:SetNWInt("MaxHP",      self.MaxHP)
-    -- NW tracking for client JASSM counter display.
-    -- Counts missiles already LAUNCHED (0-6); max stock = JASSM_MAX_STOCK.
-    self:SetNWInt("JASSM_Spent", 0)
-    self:SetNWInt("JASSM_Max",   JASSM_MAX_STOCK)
+    self:SetNWInt("HP",    self.MaxHP)
+    self:SetNWInt("MaxHP", self.MaxHP)
 
     local ang = self.CallDir:Angle()
     self:SetAngles(Angle(0, ang.y - 90, 0))
@@ -294,7 +289,7 @@ function ENT:Initialize()
     self.MuzzleIndexWeapon  = 1
     self.IsDestroyed        = false
     self.DamageTier         = 0
-    -- Total individual JASSMs launched this lifetime (counts each missile, not each fire event).
+    -- Internal brain counter: total individual JASSMs launched this lifetime.
     self.JASSM_DeployCount  = 0
     self.JASSM_Stock        = JASSM_MAX_STOCK  -- missiles remaining in bay
     -- Peaceful mode state
@@ -505,6 +500,7 @@ function ENT:ArmWeapon(weapon, ct)
     end
 end
 
+-- Legacy shim kept for external callers / subclasses.
 function ENT:PickNewWeapon(ct)
     self:EnterPeaceful(ct)
 end
@@ -825,10 +821,9 @@ function ENT:SpawnOneJASSM(deployIdx)
     jassm:Spawn()
     jassm:Activate()
 
-    -- Consume one missile from the bay and update the NW counter.
+    -- Consume one missile from the internal bay counter.
     self.JASSM_Stock       = self.JASSM_Stock - 1
     self.JASSM_DeployCount = self.JASSM_DeployCount + 1
-    self:SetNWInt("JASSM_Spent", JASSM_MAX_STOCK - self.JASSM_Stock)
 
     self:Debug(string.format("JASSM #%d deployed at %s alt=%.0f  stock=%d",
         self.JASSM_DeployCount, tostring(spawnPos), jassmAlt, self.JASSM_Stock))
@@ -847,18 +842,17 @@ function ENT:UpdateJASSM(ct)
 
     -- 20% chance to fire a triple-salvo (3 missiles, 1 s apart),
     -- capped by remaining stock so we never exceed JASSM_MAX_STOCK total.
-    local tripleRoll  = math.random() < 0.20
-    local salvoCount  = tripleRoll and math.min(3, self.JASSM_Stock) or 1
+    local tripleRoll = math.random() < 0.20
+    local salvoCount = tripleRoll and math.min(3, self.JASSM_Stock) or 1
 
     self:Debug(string.format("JASSM salvo: %d missile(s) (triple=%s, stock=%d)",
         salvoCount, tostring(tripleRoll), self.JASSM_Stock))
 
     -- First missile fires immediately.
-    local baseDeployIdx = self.JASSM_DeployCount + 1
-    self:SpawnOneJASSM(baseDeployIdx)
+    self:SpawnOneJASSM(self.JASSM_DeployCount + 1)
 
     -- Additional missiles (salvo 2 & 3) are scheduled 1 s apart via timer.
-    -- We capture the entity safely so the timer doesn't fire after removal.
+    -- entIdx is captured so the timer is safe even if the plane is removed mid-salvo.
     if salvoCount >= 2 then
         local entIdx = self:EntIndex()
         timer.Simple(1.0, function()
