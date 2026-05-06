@@ -9,7 +9,8 @@
 --   2. Chute entity updated to ent_bombin_jassm_chute_owned (local copy).
 --   3. Orbit Z is now blended into phys velocity instead of raw SetPos,
 --      reducing CCD gaps on low-tickrate servers.
---   4. Minor: all entity class references updated to _owned variants.
+--   4. Chute spawns at the missile tail, not missile center-of-mass.
+--   5. Minor: all entity class references updated to _owned variants.
 
 AddCSLuaFile("cl_init.lua")
 AddCSLuaFile("shared.lua")
@@ -31,6 +32,12 @@ local SHARD_LIFE        = 8
 
 local FREEFALL_DROP     = 900   -- units above orbit altitude where missile spawns
 local FREEFALL_MAX_FALL = 320   -- terminal velocity cap (u/s downward)
+
+-- Chute tail placement:
+--   CHUTE_TAIL_OFFSET = how far behind the missile nose the tail is (along -forward)
+--   CHUTE_ABOVE       = how far above the tail position the chute floats
+local CHUTE_TAIL_OFFSET = 120
+local CHUTE_ABOVE       = 105
 
 ENT.WeaponWindow       = 8
 ENT.DIVE_Speed         = 2200
@@ -115,6 +122,7 @@ function ENT:Initialize()
 	self:SetNWBool("Destroyed", false)
 	self:SetNWBool("EngineOn",  false)
 
+	-- tangent = the missile's initial facing direction (perpendicular to the radius, in orbit direction)
 	local tangent  = Vector(-entryOffset.y, entryOffset.x, 0) * self.OrbitDir
 	local startAng = tangent:Angle()
 	self:SetAngles(Angle(0, startAng.y, 0))
@@ -181,18 +189,26 @@ function ENT:Initialize()
 	self.EngineIgnited = false
 	self.ChuteEnt      = nil
 
-	-- Spawn the local chute immediately
+	-- Compute the tail position from the missile's facing direction at birth.
+	-- tangent is the forward vector (flat, normalized).
+	-- Tail = spawnPos  -forward * CHUTE_TAIL_OFFSET  +up * CHUTE_ABOVE
+	-- After this one-shot placement the chute's own Think() takes over,
+	-- tracking missile:GetPos() + ABOVE_OFFSET every tick.
+	local tailPos = spawnPos
+		+ (-tangent) * CHUTE_TAIL_OFFSET
+		+ Vector(0, 0, CHUTE_ABOVE)
+
 	local chute = ents.Create("ent_bombin_jassm_chute_owned")
 	if IsValid(chute) then
 		chute:SetOwner(self)
-		chute:SetPos(spawnPos + Vector(0, 0, 105))
+		chute:SetPos(tailPos)
 		chute:SetAngles(Angle(0, startAng.y, 0))
 		chute:Spawn()
 		chute:Activate()
 		self.ChuteEnt = chute
 	end
 
-	self:Debug("Spawned (freefall) at " .. tostring(spawnPos) .. ", ignition alt " .. math.Round(self.sky))
+	self:Debug("Spawned (freefall) at " .. tostring(spawnPos) .. ", chute tail at " .. tostring(tailPos) .. ", ignition alt " .. math.Round(self.sky))
 end
 
 -- ================================================================
@@ -506,11 +522,9 @@ function ENT:PhysicsUpdate(phys)
 		vel = vel + posErr:GetNormalized() * 80
 	end
 
-	-- FIX: blend the altitude correction into velocity Z rather than
-	-- raw SetPos, so the physics engine sees a continuous trajectory
-	-- and CCD doesn't miss contacts on low-tickrate servers.
+	-- Blend altitude correction into velocity Z (no raw SetPos)
 	local altError = liveAlt - pos.z
-	vel.z = math.Clamp(altError * 8, -120, 120)  -- gentle Z push, 8 u/s per unit of error
+	vel.z = math.Clamp(altError * 8, -120, 120)
 
 	local rawYawDelta  = math.NormalizeAngle(self.ang.y - (self.PrevYaw or self.ang.y))
 	self.PrevYaw       = self.ang.y
