@@ -9,15 +9,27 @@ PrecacheParticleSystem("fire_medium_02")
 
 -- ============================================================
 -- SOUND BROADCAST
+-- Both "bombin_plane_sound" (legacy) and "bombin_plane_spatial_sound"
+-- (per-player propagation system) share the identical wire format:
+--   String  soundPath
+--   Vector  nearPos       (NEAR_OFFSET u toward the plane from player)
+--   UInt8   soundLevel
+--   UInt8   pitch
+--   Float   volume        (pre-attenuated by server; 0.0 – 1.0)
+-- Playing at nearPos keeps the Source engine from re-attenuating;
+-- volume is already distance-corrected server-side.
 -- ============================================================
-net.Receive("bombin_plane_sound", function()
+local function HandlePlaneSound()
     local path   = net.ReadString()
     local pos    = net.ReadVector()
     local level  = net.ReadUInt(8)
     local pitch  = net.ReadUInt(8)
     local volume = net.ReadFloat()
     sound.Play(path, pos, level, pitch, volume)
-end)
+end
+
+net.Receive("bombin_plane_sound",         HandlePlaneSound)
+net.Receive("bombin_plane_spatial_sound", HandlePlaneSound)
 
 -- ============================================================
 -- DAMAGE TIERS
