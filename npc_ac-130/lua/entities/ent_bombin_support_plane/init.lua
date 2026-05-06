@@ -774,56 +774,66 @@ function ENT:Update105mm(ct)
     )
 end
 
+-- ============================================================
+-- JASSM DEPLOYMENT
+-- ============================================================
+
 function ENT:UpdateJASSM(ct)
     if self.JASSM_Fired then return end
     self.JASSM_Fired = true
 
-    if not scripted_ents.GetStored("ent_bombin_jassm") then
-        self:Debug("JASSM: ent_bombin_jassm not registered, skipping")
+    -- Use the owned variant: it accepts a pre-set position via SpawnedFromPlane.
+    if not scripted_ents.GetStored("ent_bombin_jassm_owned") then
+        self:Debug("JASSM: ent_bombin_jassm_owned not registered, skipping")
         return
     end
 
-    -- Derive the JASSM altitude from the altitude stagger counter.
+    -- Altitude stagger: each successive JASSM in one flyover starts lower.
     self.JASSM_DeployCount = (self.JASSM_DeployCount or 0) + 1
-    local jassmAlt = self.sky - (self.JASSM_DeployCount * self.JASSM_AltOffset)
+    local maxDeploys = math.floor(self.SkyHeightAdd / self.JASSM_AltOffset)
+    local deployIdx  = math.min(self.JASSM_DeployCount, maxDeploys)
+    local jassmAlt   = self.sky - (deployIdx * self.JASSM_AltOffset)
 
-    -- Spawn position = plane's physical tail in world space.
-    -- LocalToWorld(JASSM_TailOffset) accounts for the plane's current
-    -- position AND angles, so the JASSM always appears at the rear of the
-    -- model regardless of heading.  We then override Z to jassmAlt so the
-    -- missile starts at the correct staggered altitude rather than the
-    -- plane's live Z (which includes jitter/drift).
+    -- Tail world position: LocalToWorld honours the plane's live angles so the
+    -- JASSM always appears at the physical rear bay regardless of heading/bank.
+    -- We override Z to jassmAlt (staggered freefall start), not the plane's
+    -- live Z which includes jitter/drift.
     local tailWorld = self:LocalToWorld(self.JASSM_TailOffset)
     local spawnPos  = Vector(tailWorld.x, tailWorld.y, jassmAlt)
 
-    -- Fallback: if the tail point is somehow out of the world (e.g. the
-    -- plane is clipping a skybox boundary), use CenterPos XY.
     if not util.IsInWorld(spawnPos) then
         spawnPos = Vector(self.CenterPos.x, self.CenterPos.y, jassmAlt)
     end
 
-    -- callDir = the plane's current flat forward — JASSM inherits the same
-    -- heading so it orbits in the same direction as the AC-130.
+    -- callDir = plane's flat forward so the JASSM orbits in the same direction.
     local callDir = self:GetForward()
-    callDir.z     = 0
+    callDir.z = 0
     if callDir:LengthSqr() < 0.01 then callDir = Vector(1, 0, 0) end
     callDir:Normalize()
 
-    local jassm = ents.Create("ent_bombin_jassm")
+    local jassm = ents.Create("ent_bombin_jassm_owned")
     if not IsValid(jassm) then self:Debug("JASSM: ents.Create failed") return end
 
+    -- Set position BEFORE Spawn() so Initialize() sees it via self:GetPos().
     jassm:SetPos(spawnPos)
     jassm:SetAngles(callDir:Angle())
-    jassm:SetVar("CenterPos",    self.CenterPos)
-    jassm:SetVar("CallDir",      callDir)
-    jassm:SetVar("Lifetime",     math.min(self.Lifetime, 35))
-    jassm:SetVar("Speed",        250)
-    jassm:SetVar("OrbitRadius",  self.OrbitRadius * 0.75)
-    jassm:SetVar("SkyHeightAdd", math.max(jassmAlt - (self.sky - self.SkyHeightAdd), 800))
+
+    -- Signal to Initialize() that the position is already correct —
+    -- skip the standalone orbit-entry calculation.
+    jassm.SpawnedFromPlane = true
+
+    -- Pass mission parameters.
+    jassm.CenterPos    = self.CenterPos
+    jassm.CallDir      = callDir
+    jassm.Lifetime     = math.min(self.Lifetime, 35)
+    jassm.Speed        = 250
+    jassm.OrbitRadius  = self.OrbitRadius * 0.75
+    jassm.SkyHeightAdd = math.max(jassmAlt - (self.sky - self.SkyHeightAdd), 800)
+
     jassm:Spawn()
     jassm:Activate()
 
-    self:Debug("JASSM deployed from tail at " .. tostring(spawnPos) .. " alt=" .. tostring(jassmAlt))
+    self:Debug("JASSM (owned) deployed from tail at " .. tostring(spawnPos) .. " alt=" .. tostring(jassmAlt))
 end
 
 function ENT:FindGround(centerPos)
