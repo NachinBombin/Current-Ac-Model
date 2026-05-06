@@ -43,9 +43,9 @@ local GAU_CAL_ID = 3
 util.AddNetworkString("bombin_plane_damage_tier")
 util.AddNetworkString("bombin_plane_spatial_sound")
 
-local SOUND_SPEED        = 4200
-local MAX_HEAR_DIST      = 18000
-local VOL_FALLOFF_EXP    = 0.08
+local SOUND_SPEED        = 8200
+local MAX_HEAR_DIST      = 88000
+local VOL_FALLOFF_EXP    = 0.01
 local NEAR_OFFSET        = 40
 
 local function PrecacheWeaponSounds()
@@ -140,7 +140,7 @@ ENT.GAU_SpraySoundDelay = 1.3
 ENT.GAU_TargetOffsetMin = 300
 ENT.GAU_TargetOffsetMax = 900
 
-ENT.GAU_HEI_Interval    = 90
+ENT.GAU_HEI_Interval    = 900
 ENT.GAU_BulletDamage    = 40
 ENT.GAU_BlastRadius     = 80
 
@@ -160,9 +160,9 @@ ENT.GAU_Spray_Delay      = 0.033
 
 ENT.MuzzleForwardOffset  = 250
 ENT.MuzzleSideOffset     = -60
-ENT.Plane_Ambient_SoundPath = "sounds/ac/ac-130B.wav"
+ENT.Plane_Ambient_SoundPath = "ac/bomber_engine_high.wav"
 
-ENT.JASSM_AltOffset = 1500
+ENT.JASSM_AltOffset = 500
 
 ENT.MaxHP = 8000
 ENT.DamageTierThresholds = { 0.75, 0.50, 0.25 }
