@@ -69,13 +69,23 @@ local BREAKABLE = {
     ["prop_physics_multiplayer"] = true,
 }
 
+-- Returns the best valid attacker entity, falling back to the world entity.
+-- Prevents NULL crashes in BlastDamage / TakeDamageInfo when the plane
+-- has been removed before in-flight bullets reach their target.
+local function resolve_attacker(proj)
+    if IsValid(proj.firer_ent) then return proj.firer_ent end
+    if IsValid(proj.shooter)   then return proj.shooter   end
+    return game.GetWorld()
+end
+
 local function apply_damage(proj, tr, shooter)
-    local hit_ent = tr.Entity
+    local hit_ent  = tr.Entity
     if not IsValid(hit_ent) then return end
-    local damage = proj.damage
-    local fvec   = proj.dir * damage * FORCE_MUL
+    local attacker = resolve_attacker(proj)
+    local damage   = proj.damage
+    local fvec     = proj.dir * damage * FORCE_MUL
     if BREAKABLE[hit_ent:GetClass()] then
-        shooter:FireBullets({
+        attacker:FireBullets({
             Src       = tr.HitPos - proj.dir,
             Dir       = proj.dir,
             Damage    = damage,
@@ -83,14 +93,14 @@ local function apply_damage(proj, tr, shooter)
             Distance  = 2,
             Num       = 1,
             Tracer    = 0,
-            Inflictor = shooter,
+            Inflictor = attacker,
         })
         return
     end
     local dmg = DamageInfo()
     dmg:SetDamage(damage)
-    dmg:SetAttacker(shooter)
-    dmg:SetInflictor(shooter)
+    dmg:SetAttacker(attacker)
+    dmg:SetInflictor(attacker)
     dmg:SetDamageType(DMG_BULLET)
     dmg:SetDamagePosition(tr.HitPos)
     dmg:SetDamageForce(fvec)
@@ -98,10 +108,10 @@ local function apply_damage(proj, tr, shooter)
 end
 
 local function apply_impact_fx(proj, tr)
-    local hitPos  = tr.HitPos
-    local shooter = IsValid(proj.firer_ent) and proj.firer_ent or proj.shooter
+    local hitPos   = tr.HitPos
+    local attacker = resolve_attacker(proj)
 
-    util.BlastDamage(shooter, shooter, hitPos + Vector(0,0,36), proj.blast_radius, proj.damage)
+    util.BlastDamage(attacker, attacker, hitPos + Vector(0,0,36), proj.blast_radius, proj.damage)
 
     local ed1 = EffectData()
     ed1:SetOrigin(hitPos) ed1:SetScale(1.5) ed1:SetMagnitude(1.5) ed1:SetRadius(40)
@@ -122,10 +132,9 @@ local function apply_impact_fx(proj, tr)
 
     if proj.bullet_index % proj.hei_interval == 0 then
         if gred and gred.CreateShell then
-            local firer = IsValid(proj.firer_ent) and proj.firer_ent or proj.shooter
             local shell = gred.CreateShell(
                 hitPos + Vector(0,0,30), Angle(90,0,0),
-                firer, {firer}, 20, "HE", 80, 0.1, nil, 60, nil, 0.005
+                attacker, {attacker}, 20, "HE", 80, 0.1, nil, 60, nil, 0.005
             )
             if IsValid(shell) then
                 shell.Armed = true shell.ShouldExplode = true
@@ -161,8 +170,8 @@ local function move_projectile(proj)
     if tr.Hit and not tr.HitSky then
         proj.pos = tr.HitPos
         proj.hit = true
-        if SERVER and IsValid(tr.Entity) and IsValid(shooter) then
-            apply_damage(proj, tr, shooter)
+        if SERVER and IsValid(tr.Entity) then
+            apply_damage(proj, tr, resolve_attacker(proj))
         end
         apply_impact_fx(proj, tr)
         return true
