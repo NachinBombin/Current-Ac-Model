@@ -7,8 +7,8 @@ local BLAST_RADIUS  = 80
 local BLAST_DAMAGE  = 40
 local HEI_INTERVAL  = 90
 local GAU_CAL_ID    = 3
-local MUZZLE_VEL    = 85000
-local MAX_DIST      = 22000
+local MUZZLE_VEL    = 76000
+local MAX_DIST      = 50000
 local MIN_SPEED     = 200
 local FORCE_MUL     = 5.0
 
