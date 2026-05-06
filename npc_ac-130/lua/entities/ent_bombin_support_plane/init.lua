@@ -1,5 +1,6 @@
 AddCSLuaFile("cl_init.lua")
 AddCSLuaFile("shared.lua")
+AddCSLuaFile("cl_jassm_hud.lua")
 include("shared.lua")
 
 local function HasGred()
@@ -30,6 +31,9 @@ local SOUND_105_IMPACT = "killstreak_explosions/105_explosion.wav"
 -- Peaceful mode timing (seconds)
 local PEACEFUL_MIN = 4
 local PEACEFUL_MAX = 7
+
+-- Maximum total JASSMs the plane may deploy over its entire lifetime.
+local JASSM_MAX_STOCK = 6
 
 -- ============================================================
 -- SPATIAL PER-PLAYER SOUND SYSTEM
@@ -233,8 +237,12 @@ function ENT:Initialize()
     self:SetPos(spawnPos)
     self.LastPos = spawnPos
 
-    self:SetNWInt("HP",    self.MaxHP)
-    self:SetNWInt("MaxHP", self.MaxHP)
+    self:SetNWInt("HP",         self.MaxHP)
+    self:SetNWInt("MaxHP",      self.MaxHP)
+    -- NW tracking for client JASSM counter display.
+    -- Counts missiles already LAUNCHED (0-6); max stock = JASSM_MAX_STOCK.
+    self:SetNWInt("JASSM_Spent", 0)
+    self:SetNWInt("JASSM_Max",   JASSM_MAX_STOCK)
 
     local ang = self.CallDir:Angle()
     self:SetAngles(Angle(0, ang.y - 90, 0))
@@ -276,7 +284,7 @@ function ENT:Initialize()
     self.NextShotTimeSpray  = 0
     self.NextSpraySoundTime = 0
     self.SprayBulletCount   = 0
-    self.GAU_SprayBurstEnd  = 0  -- time when the current spray burst's bullet window closes
+    self.GAU_SprayBurstEnd  = 0
     self.GAU_BurstTimes     = {}
     self.GAU_BurstsFired    = 0
     self.GAU_ActiveBursts   = {}
@@ -286,7 +294,9 @@ function ENT:Initialize()
     self.MuzzleIndexWeapon  = 1
     self.IsDestroyed        = false
     self.DamageTier         = 0
+    -- Total individual JASSMs launched this lifetime (counts each missile, not each fire event).
     self.JASSM_DeployCount  = 0
+    self.JASSM_Stock        = JASSM_MAX_STOCK  -- missiles remaining in bay
     -- Peaceful mode state
     self.IsPeaceful         = false
     self.PeacefulUntil      = 0
@@ -404,10 +414,8 @@ end
 -- ============================================================
 
 function ENT:HandleWeaponWindow(ct)
-    -- Gate 1: currently in a peaceful cooldown — do nothing
     if self.IsPeaceful then
         if ct >= self.PeacefulUntil then
-            -- Peaceful window expired — arm the pre-chosen weapon
             self.IsPeaceful = false
             self:ArmWeapon(self._PendingWeapon, ct)
             self._PendingWeapon = nil
@@ -415,19 +423,16 @@ function ENT:HandleWeaponWindow(ct)
         return
     end
 
-    -- Gate 2: no weapon active yet (first call after spawn or race guard)
     if not self.CurrentWeapon then
         self:EnterPeaceful(ct)
         return
     end
 
-    -- Gate 3: active weapon window has expired — enter peaceful cooldown
     if ct >= self.WeaponWindowEnd then
         self:EnterPeaceful(ct)
         return
     end
 
-    -- Gate 4: dispatch to the active weapon updater
     if     self.CurrentWeapon == "25mm"       then self:Update25mmBurstsSchedule(ct)
     elseif self.CurrentWeapon == "40mm"       then self:Update40mm(ct)
     elseif self.CurrentWeapon == "105mm"      then self:Update105mm(ct)
@@ -435,19 +440,24 @@ function ENT:HandleWeaponWindow(ct)
     elseif self.CurrentWeapon == "jassm"      then self:UpdateJASSM(ct) end
 end
 
--- Called at the end of every weapon window to begin the peaceful cooldown.
 function ENT:EnterPeaceful(ct)
     self:StopSprayLoop()
     self.CurrentWeapon  = nil
     self.IsPeaceful     = true
     self.PeacefulUntil  = ct + math.Rand(PEACEFUL_MIN, PEACEFUL_MAX)
-    -- Pre-roll the next weapon so it is ready the moment the cooldown ends.
     self._PendingWeapon = self:RollWeapon()
     self:Debug("Peaceful mode for " .. string.format("%.1f", self.PeacefulUntil - ct) .. "s, next: " .. self._PendingWeapon)
 end
 
--- Rolls and returns a random weapon name string.
 function ENT:RollWeapon()
+    -- If the bay is empty, never roll JASSM again.
+    if (self.JASSM_Stock or 0) <= 0 then
+        local roll = math.random(1, 4)
+        if     roll == 1 then return "25mm"
+        elseif roll == 2 then return "40mm"
+        elseif roll == 3 then return "105mm"
+        else                   return "25mm_spray" end
+    end
     local roll = math.random(1, 5)
     if     roll == 1 then return "25mm"
     elseif roll == 2 then return "40mm"
@@ -456,10 +466,12 @@ function ENT:RollWeapon()
     else                   return "jassm" end
 end
 
--- Arms a weapon and opens its fire window.  Called when the peaceful
--- cooldown expires.
 function ENT:ArmWeapon(weapon, ct)
     weapon = weapon or self:RollWeapon()
+    -- Safety: if JASSM was chosen but stock is now 0, reroll
+    if weapon == "jassm" and (self.JASSM_Stock or 0) <= 0 then
+        weapon = self:RollWeapon()
+    end
     self.CurrentWeapon   = weapon
     self.WeaponWindowEnd = ct + self.WeaponWindow
     self:Debug("Armed: " .. self.CurrentWeapon)
@@ -481,7 +493,7 @@ function ENT:ArmWeapon(weapon, ct)
         self.NextShotTimeSpray  = ct
         self.NextSpraySoundTime = ct
         self.SprayBulletCount   = 0
-        self.GAU_SprayBurstEnd  = 0  -- no bullet window open yet; first burst opens it immediately
+        self.GAU_SprayBurstEnd  = 0
         local targetPos = self:GetTargetGroundPos()
         local sweepDir  = Vector(math.Rand(-1,1), math.Rand(-1,1), 0)
         if sweepDir:LengthSqr() < 0.01 then sweepDir = Vector(1,0,0) end
@@ -493,7 +505,6 @@ function ENT:ArmWeapon(weapon, ct)
     end
 end
 
--- Legacy shim kept for external callers / subclasses.
 function ENT:PickNewWeapon(ct)
     self:EnterPeaceful(ct)
 end
@@ -517,11 +528,9 @@ function ENT:PlaySpraySoundAndFlash(ct)
         1.0
     )
     self:SpawnWeaponMuzzleFX("cball_explode", 1)
-    -- Open a bullet-firing window for (GAU_SpraySoundDelay - GAU_SprayPauseDuration) seconds.
-    -- Bullets are silenced for the remaining GAU_SprayPauseDuration seconds until the next burst.
     local fireDuration = self.GAU_SpraySoundDelay - self.GAU_SprayPauseDuration
     self.GAU_SprayBurstEnd  = ct + fireDuration
-    self.NextShotTimeSpray  = ct  -- allow bullets to start immediately this tick
+    self.NextShotTimeSpray  = ct
     self.NextSpraySoundTime = ct + self.GAU_SpraySoundDelay
 end
 
@@ -663,18 +672,11 @@ end
 
 function ENT:Update25mmSpray(ct)
     if ct >= self.WeaponWindowEnd then self:StopSprayLoop() return end
-
-    -- Sound + muzzle flash tick: fires every GAU_SpraySoundDelay seconds.
-    -- PlaySpraySoundAndFlash also opens the bullet window (sets GAU_SprayBurstEnd).
     if self.NextSpraySoundTime > 0 and ct >= self.NextSpraySoundTime then
         self:PlaySpraySoundAndFlash(ct)
     end
-
-    -- Bullet gate: only fire while inside the current burst's active window.
-    -- Outside that window (the 0.6s pause) bullets are suppressed entirely.
     if ct >= (self.GAU_SprayBurstEnd or 0) then return end
     if ct < self.NextShotTimeSpray then return end
-
     self.NextShotTimeSpray = ct + self.GAU_Spray_Delay
     self.SprayBulletCount  = self.SprayBulletCount + 1
     local targetPos   = self:GetTargetGroundPos()
@@ -778,26 +780,24 @@ end
 -- JASSM DEPLOYMENT
 -- ============================================================
 
-function ENT:UpdateJASSM(ct)
-    if self.JASSM_Fired then return end
-    self.JASSM_Fired = true
-
-    -- Use the owned variant: it accepts a pre-set position via SpawnedFromPlane.
+-- Spawns one JASSM from the tail bay, consuming one unit of stock.
+-- Returns true if the missile was successfully created.
+function ENT:SpawnOneJASSM(deployIdx)
     if not scripted_ents.GetStored("ent_bombin_jassm_owned") then
         self:Debug("JASSM: ent_bombin_jassm_owned not registered, skipping")
-        return
+        return false
     end
 
-    -- Altitude stagger: each successive JASSM in one flyover starts lower.
-    self.JASSM_DeployCount = (self.JASSM_DeployCount or 0) + 1
-    local maxDeploys = math.floor(self.SkyHeightAdd / self.JASSM_AltOffset)
-    local deployIdx  = math.min(self.JASSM_DeployCount, maxDeploys)
-    local jassmAlt   = self.sky - (deployIdx * self.JASSM_AltOffset)
+    if (self.JASSM_Stock or 0) <= 0 then
+        self:Debug("JASSM: bay empty, cannot spawn")
+        return false
+    end
 
-    -- Tail world position: LocalToWorld honours the plane's live angles so the
-    -- JASSM always appears at the physical rear bay regardless of heading/bank.
-    -- We override Z to jassmAlt (staggered freefall start), not the plane's
-    -- live Z which includes jitter/drift.
+    -- Altitude stagger: each successive JASSM starts slightly lower.
+    local maxDeploys = math.floor(self.SkyHeightAdd / self.JASSM_AltOffset)
+    local clampedIdx = math.min(deployIdx, maxDeploys)
+    local jassmAlt   = self.sky - (clampedIdx * self.JASSM_AltOffset)
+
     local tailWorld = self:LocalToWorld(self.JASSM_TailOffset)
     local spawnPos  = Vector(tailWorld.x, tailWorld.y, jassmAlt)
 
@@ -805,35 +805,77 @@ function ENT:UpdateJASSM(ct)
         spawnPos = Vector(self.CenterPos.x, self.CenterPos.y, jassmAlt)
     end
 
-    -- callDir = plane's flat forward so the JASSM orbits in the same direction.
     local callDir = self:GetForward()
     callDir.z = 0
     if callDir:LengthSqr() < 0.01 then callDir = Vector(1, 0, 0) end
     callDir:Normalize()
 
     local jassm = ents.Create("ent_bombin_jassm_owned")
-    if not IsValid(jassm) then self:Debug("JASSM: ents.Create failed") return end
+    if not IsValid(jassm) then self:Debug("JASSM: ents.Create failed") return false end
 
-    -- Set position BEFORE Spawn() so Initialize() sees it via self:GetPos().
     jassm:SetPos(spawnPos)
     jassm:SetAngles(callDir:Angle())
-
-    -- Signal to Initialize() that the position is already correct —
-    -- skip the standalone orbit-entry calculation.
     jassm.SpawnedFromPlane = true
-
-    -- Pass mission parameters.
     jassm.CenterPos    = self.CenterPos
     jassm.CallDir      = callDir
     jassm.Lifetime     = math.min(self.Lifetime, 35)
     jassm.Speed        = 250
     jassm.OrbitRadius  = self.OrbitRadius * 0.75
     jassm.SkyHeightAdd = math.max(jassmAlt - (self.sky - self.SkyHeightAdd), 800)
-
     jassm:Spawn()
     jassm:Activate()
 
-    self:Debug("JASSM (owned) deployed from tail at " .. tostring(spawnPos) .. " alt=" .. tostring(jassmAlt))
+    -- Consume one missile from the bay and update the NW counter.
+    self.JASSM_Stock       = self.JASSM_Stock - 1
+    self.JASSM_DeployCount = self.JASSM_DeployCount + 1
+    self:SetNWInt("JASSM_Spent", JASSM_MAX_STOCK - self.JASSM_Stock)
+
+    self:Debug(string.format("JASSM #%d deployed at %s alt=%.0f  stock=%d",
+        self.JASSM_DeployCount, tostring(spawnPos), jassmAlt, self.JASSM_Stock))
+    return true
+end
+
+function ENT:UpdateJASSM(ct)
+    if self.JASSM_Fired then return end
+    self.JASSM_Fired = true
+
+    -- Abort silently if the bay is empty (weapon was rolled before stock hit 0).
+    if (self.JASSM_Stock or 0) <= 0 then
+        self:Debug("JASSM: bay empty this window, skipping")
+        return
+    end
+
+    -- 20% chance to fire a triple-salvo (3 missiles, 1 s apart),
+    -- capped by remaining stock so we never exceed JASSM_MAX_STOCK total.
+    local tripleRoll  = math.random() < 0.20
+    local salvoCount  = tripleRoll and math.min(3, self.JASSM_Stock) or 1
+
+    self:Debug(string.format("JASSM salvo: %d missile(s) (triple=%s, stock=%d)",
+        salvoCount, tostring(tripleRoll), self.JASSM_Stock))
+
+    -- First missile fires immediately.
+    local baseDeployIdx = self.JASSM_DeployCount + 1
+    self:SpawnOneJASSM(baseDeployIdx)
+
+    -- Additional missiles (salvo 2 & 3) are scheduled 1 s apart via timer.
+    -- We capture the entity safely so the timer doesn't fire after removal.
+    if salvoCount >= 2 then
+        local entIdx = self:EntIndex()
+        timer.Simple(1.0, function()
+            local plane = Entity(entIdx)
+            if not IsValid(plane) or plane:IsMarkedForDeletion() then return end
+            plane:SpawnOneJASSM(plane.JASSM_DeployCount + 1)
+        end)
+    end
+
+    if salvoCount >= 3 then
+        local entIdx = self:EntIndex()
+        timer.Simple(2.0, function()
+            local plane = Entity(entIdx)
+            if not IsValid(plane) or plane:IsMarkedForDeletion() then return end
+            plane:SpawnOneJASSM(plane.JASSM_DeployCount + 1)
+        end)
+    end
 end
 
 function ENT:FindGround(centerPos)
