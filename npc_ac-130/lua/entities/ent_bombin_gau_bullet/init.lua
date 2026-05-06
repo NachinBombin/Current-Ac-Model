@@ -24,14 +24,7 @@ local IMPACT_SOUNDS = {
     "physics/metal/metal_solid_impact_bullet3.wav",
 }
 
-local GAU_BRRT_SOUNDS = {
-    "gunsounds/brrt_01.wav",
-    "gunsounds/brrt_02.wav",
-    "gunsounds/brrt_03.wav",
-    "gunsounds/brrt_04.wav",
-}
-
-for _, s in ipairs(GAU_BRRT_SOUNDS) do util.PrecacheSound(s) end
+for _, s in ipairs(IMPACT_SOUNDS) do util.PrecacheSound(s) end
 util.PrecacheModel(BULLET_MODEL)
 
 bombin_gau_store = bombin_gau_store or {
@@ -118,7 +111,9 @@ local function apply_impact_fx(proj, tr)
         net.WriteUInt(GAU_CAL_ID, 4)
     net.Broadcast()
 
-    sound.Play(table.Random(IMPACT_SOUNDS), hitPos, 75, math.random(95,105), 0.8)
+    -- Impact sound is handled client-side in cl_init.lua with proper
+    -- level and delay. Do NOT call sound.Play here (server-side
+    -- sound.Play is never heard by players).
 
     if proj.bullet_index % proj.hei_interval == 0 then
         if gred and gred.CreateShell then
@@ -232,9 +227,6 @@ function ENT:Initialize()
 
     local pos = self:GetPos()
     local fwd = self:GetAngles():Forward()
-
-    -- AC-130 GAU uses a burst loop sound played once per burst on the plane, not per bullet.
-    -- No per-bullet sound here on purpose.
 
     bombin_gau_spawn(
         IsValid(self.Firer) and self.Firer or self,

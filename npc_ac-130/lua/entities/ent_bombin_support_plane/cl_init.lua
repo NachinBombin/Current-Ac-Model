@@ -5,7 +5,6 @@ game.AddParticles("particles/fire_01.pcf")
 PrecacheParticleSystem("fire_medium_02")
 
 local SOUND_SPEED_UNITS = 34300
-local GAU_SOUND_SPEED   = 8000
 
 -- ============================================================
 -- PENDING SOUND QUEUE
@@ -13,7 +12,7 @@ local GAU_SOUND_SPEED   = 8000
 -- hook. This avoids stacking hundreds of timer.Simple calls
 -- during GAU spray (fire rate 0.033s), which causes GMod to
 -- silently drop or never fire the timers.
--- Each entry: { playAt = CurTime, path, pos, level, pitch, vol }
+-- Each entry: { playAt, path, pos, level, pitch, vol }
 -- ============================================================
 local PendingSounds = {}
 
@@ -48,6 +47,8 @@ end
 
 -- ============================================================
 -- GENERIC PLANE SOUND (40mm, 105mm, pass, destruction)
+-- Delay = player distance to event / real speed of sound.
+-- Level 255: disables distance cutoff on client sound.Play.
 -- ============================================================
 net.Receive("bombin_plane_sound", function()
     local path       = net.ReadString()
@@ -60,22 +61,22 @@ net.Receive("bombin_plane_sound", function()
     local distDelay  = EyePos():Distance(pos) / SOUND_SPEED_UNITS
     local totalDelay = math.max(0, extraDelay) + distDelay
 
-    -- Override level to 255: sound.Play on client is 2D; level only
-    -- acts as a hard cutoff radius. 255 disables that cutoff entirely.
     QueueSound(totalDelay, path, pos, 255, pitch, volume)
 end)
 
 -- ============================================================
--- GAU MUZZLE FLASH + BRRT
--- Flash rendered immediately. Brrt queued with travel delay.
+-- GAU MUZZLE FLASH
+-- Flash is IMMEDIATE. No sound delay — the brrt plays instantly
+-- at the same time as the flash. The plane is high altitude so
+-- players hear it regardless of distance thanks to level 255.
 -- ============================================================
 net.Receive("bombin_gau_muzzle_flash", function()
     local muzzlePos  = net.ReadVector()
     local scale      = net.ReadFloat()
     local soundPath  = net.ReadString()
-    local soundSpeed = net.ReadFloat()
+    local soundSpeed = net.ReadFloat()  -- kept for net compatibility, not used
 
-    -- Flash: immediate, no delay
+    -- Flash: immediate
     local ed = EffectData()
     ed:SetOrigin(muzzlePos)
     ed:SetScale(scale)
@@ -93,14 +94,10 @@ net.Receive("bombin_gau_muzzle_flash", function()
         util.Effect("ManhackSparks", sp)
     end
 
-    if soundPath == "" then return end
-
-    local delay = EyePos():Distance(muzzlePos) / math.max(soundSpeed, 100)
-    local pitch = math.random(90, 105)
-    -- Copy pos so closure doesn't reference a mutated vector
-    local capPos = Vector(muzzlePos.x, muzzlePos.y, muzzlePos.z)
-
-    QueueSound(delay, soundPath, capPos, 255, pitch, 1.0)
+    -- Brrt: also immediate, level 255 ensures full volume at any distance
+    if soundPath ~= "" then
+        sound.Play(soundPath, muzzlePos, 255, math.random(90, 105), 1.0)
+    end
 end)
 
 -- ============================================================

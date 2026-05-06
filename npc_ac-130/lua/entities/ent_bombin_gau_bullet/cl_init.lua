@@ -3,13 +3,13 @@ include("shared.lua")
 local mat_beam = Material("effects/laser1")
 local mat_glow = Material("sprites/light_glow02_add")
 
-local MUZZLE_VEL = 85000
-local MAX_DIST   = 22000
-local MIN_SPEED  = 200
-
--- Impact sounds also travel-delayed with the same exaggerated constant
--- so the dirt kick and spark are seen before the crack.
-local GAU_SOUND_SPEED = 8000
+local MUZZLE_VEL       = 85000
+local MAX_DIST         = 22000
+local MIN_SPEED        = 200
+-- Use real speed of sound for impact cracks: they come from ground level
+-- where the player can see them clearly. Exaggerated delay here would
+-- feel broken rather than cinematic.
+local IMPACT_SND_SPEED = 34300
 
 local IMPACT_SOUNDS = {
     "physics/concrete/impact_bullet1.wav",
@@ -23,14 +23,14 @@ local IMPACT_SOUNDS = {
     "physics/metal/metal_solid_impact_bullet3.wav",
 }
 
-bombin_gau_store = bombin_gau_store or {
-    last_idx           = 0,
-    buffer_size        = 128,
-    buffer             = {},
-    active_projectiles = {},
-    -- pending_impact_sounds: queue of { pos, time } waiting to play
-    pending_sounds     = {},
-}
+-- Guard: always ensure pending_sounds exists even if the global
+-- was created by a previous map load that predates this field.
+bombin_gau_store = bombin_gau_store or {}
+bombin_gau_store.last_idx           = bombin_gau_store.last_idx           or 0
+bombin_gau_store.buffer_size        = bombin_gau_store.buffer_size        or 128
+bombin_gau_store.buffer             = bombin_gau_store.buffer             or {}
+bombin_gau_store.active_projectiles = bombin_gau_store.active_projectiles or {}
+bombin_gau_store.pending_sounds     = bombin_gau_store.pending_sounds     or {}
 
 if #bombin_gau_store.buffer == 0 then
     for i = 1, bombin_gau_store.buffer_size do
@@ -91,10 +91,6 @@ local function move_cl()
             local step    = proj.dir * (proj.speed * tick_interval)
             local new_pos = proj.pos + step
 
-            -- Client-side impact detection for sound scheduling.
-            -- We trace and queue the impact sound with travel delay so the
-            -- dirt/spark FX (which play instantly via the server net effect)
-            -- are seen before the crack arrives.
             local tr = util.TraceLine({
                 start  = proj.pos,
                 endpos = new_pos,
@@ -103,13 +99,16 @@ local function move_cl()
 
             if tr.Hit and not tr.HitSky then
                 proj.hit = true
-                local hitPos   = tr.HitPos
-                local dist     = EyePos():Distance(hitPos)
-                local delay    = dist / GAU_SOUND_SPEED
-                local snd      = IMPACT_SOUNDS[math.random(#IMPACT_SOUNDS)]
-                local playAt   = UnPredictedCurTime() + delay
-                local ps       = store.pending_sounds
-                ps[#ps + 1]    = { snd = snd, pos = hitPos, playAt = playAt }
+                local hitPos = tr.HitPos
+                local dist   = EyePos():Distance(hitPos)
+                local delay  = dist / IMPACT_SND_SPEED
+                local snd    = IMPACT_SOUNDS[math.random(#IMPACT_SOUNDS)]
+                local ps     = store.pending_sounds
+                ps[#ps + 1]  = {
+                    snd    = snd,
+                    pos    = hitPos,
+                    playAt = UnPredictedCurTime() + delay,
+                }
             else
                 proj.old_vel  = proj.vel
                 proj.old_pos  = proj.pos
@@ -130,7 +129,8 @@ hook.Add("CreateMove", "bombin_gau_move_cl", function()
     end
 end)
 
--- Drain the pending sound queue each frame
+-- Drain pending impact sounds each frame.
+-- Level 255: disables distance cutoff on client-side sound.Play.
 hook.Add("Think", "bombin_gau_impact_sounds", function()
     local ps  = bombin_gau_store.pending_sounds
     local now = UnPredictedCurTime()
@@ -138,7 +138,7 @@ hook.Add("Think", "bombin_gau_impact_sounds", function()
     while i <= #ps do
         local e = ps[i]
         if now >= e.playAt then
-            sound.Play(e.snd, e.pos, 75, math.random(95, 105), 0.8)
+            sound.Play(e.snd, e.pos, 255, math.random(95, 105), 1.0)
             ps[i] = ps[#ps]
             ps[#ps] = nil
         else
