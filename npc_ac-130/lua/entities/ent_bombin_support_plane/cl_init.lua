@@ -23,38 +23,44 @@ end
 net.Receive("bombin_plane_sound",         HandlePlaneSound)
 net.Receive("bombin_plane_spatial_sound", HandlePlaneSound)
 
+-- 105mm impact: direct broadcast, no delay, plays at blast position
+net.Receive("bombin_105mm_direct_sound", function()
+    local pos   = net.ReadVector()
+    local level = net.ReadUInt(8)
+    local pitch = net.ReadUInt(8)
+    sound.Play("killstreak_explosions/105_explosion.wav", pos, level, pitch, 1.0)
+end)
+
 -- ============================================================
 -- AMBIENT ENGINE LOOP
 --
--- ENT:InitializeOnClient() does NOT exist in GMod's SENT system.
--- The correct approach: hook OnEntityCreated, which fires the same
--- frame the entity becomes valid on the client, with all NWVars
--- already populated (unlike net messages sent during Initialize).
+-- OnEntityCreated is a SHARED hook. Without CLIENT guard it also
+-- fires on the server, where CreateSound does nothing audible.
+-- The if CLIENT then block ensures this only runs in the client realm.
 --
--- Server sets NWBool "AmbientLoopActive" = true in Initialize().
--- ENT:OnRemove() (real callback) stops the loop on removal.
+-- timer.Simple(0) defers one frame so NWVars have propagated
+-- before we read AmbientLoopActive.
 -- ============================================================
 local AmbientLoops = {}  -- [entIndex] = CSoundPatch
 
-hook.Add("OnEntityCreated", "bombin_plane_ambient_loop", function(ent)
-    if not IsValid(ent) then return end
-    if ent:GetClass() ~= "ent_bombin_support_plane" then return end
-
-    -- Defer one frame so the entity finishes its own Initialize pass
-    -- and NWBool is guaranteed to have propagated.
-    timer.Simple(0, function()
+if CLIENT then
+    hook.Add("OnEntityCreated", "bombin_plane_ambient_loop", function(ent)
         if not IsValid(ent) then return end
-        if not ent:GetNWBool("AmbientLoopActive", false) then return end
-        local idx = ent:EntIndex()
-        if AmbientLoops[idx] then return end  -- already running
-        local snd = CreateSound(ent, ent.Plane_Ambient_SoundPath)
-        if snd then
-            snd:SetSoundLevel(80)
-            snd:Play()
-            AmbientLoops[idx] = snd
-        end
+        if ent:GetClass() ~= "ent_bombin_support_plane" then return end
+        timer.Simple(0, function()
+            if not IsValid(ent) then return end
+            if not ent:GetNWBool("AmbientLoopActive", false) then return end
+            local idx = ent:EntIndex()
+            if AmbientLoops[idx] then return end
+            local snd = CreateSound(ent, ent.Plane_Ambient_SoundPath)
+            if snd then
+                snd:SetSoundLevel(80)
+                snd:Play()
+                AmbientLoops[idx] = snd
+            end
+        end)
     end)
-end)
+end
 
 function ENT:OnRemove()
     local snd = AmbientLoops[self:EntIndex()]

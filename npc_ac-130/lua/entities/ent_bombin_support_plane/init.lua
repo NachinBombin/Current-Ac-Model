@@ -33,7 +33,7 @@ local SOUND_105_IMPACT = "killstreak_explosions/105_explosion.wav"
 
 util.AddNetworkString("bombin_plane_damage_tier")
 util.AddNetworkString("bombin_plane_spatial_sound")
-util.AddNetworkString("bombin_105mm_impact")
+util.AddNetworkString("bombin_105mm_direct_sound")  -- instant broadcast, no delay queue
 
 local SOUND_SPEED     = 8200
 local MAX_HEAR_DIST   = 88000
@@ -111,32 +111,28 @@ end
 -- ============================================================
 -- 105mm SHELL IMPACT TRACKING
 --
--- Gred shells do not expose an OnExplode callback. Instead we
--- store every spawned 105mm shell reference in a weak table.
--- hook.Add("EntityRemoved") fires server-side the frame before
--- the entity is deleted. At that point shell:GetPos() is still
--- valid and equals the blast position (Gred removes shells at
--- the impact point). We capture that position and emit the
--- impact sound spatially.
+-- Impact sounds must be IMMEDIATE — the blast visual fires the
+-- same frame. We bypass EmitSpatialSound (which queues via
+-- FlushPendingSounds in Think) and instead send a direct
+-- net.Broadcast so every client hears it this tick.
+--
+-- EntityRemoved fires server-side the frame before the entity
+-- is deleted; shell:GetPos() at that point == blast position.
 -- ============================================================
-local Shells105 = {}  -- [entIndex] = { plane = planeEnt, lastPos = Vector }
+local Shells105 = {}
 
 hook.Add("EntityRemoved", "bombin_105mm_shell_sound", function(ent)
     if not IsValid(ent) then return end
     local data = Shells105[ent:EntIndex()]
     if not data then return end
-    local plane = data.plane
-    local pos   = ent:GetPos()  -- blast position: still valid in EntityRemoved
+    local pos = ent:GetPos()
     Shells105[ent:EntIndex()] = nil
-    if IsValid(plane) then
-        plane:EmitSpatialSound(
-            SOUND_105_IMPACT,
-            pos,
-            WEAPON_LEVEL,
-            math.random(96, 104),
-            1.0
-        )
-    end
+    -- Direct broadcast: no delay queue, fires this server tick
+    net.Start("bombin_105mm_direct_sound")
+        net.WriteVector( pos )
+        net.WriteUInt  ( WEAPON_LEVEL, 8 )
+        net.WriteUInt  ( math.random(96, 104), 8 )
+    net.Broadcast()
 end)
 
 -- ============================================================
@@ -236,7 +232,6 @@ function ENT:Initialize()
 
     self:SetNWInt("HP",    self.MaxHP)
     self:SetNWInt("MaxHP", self.MaxHP)
-    -- AmbientLoopActive: read client-side in OnEntityCreated hook (cl_init.lua).
     self:SetNWBool("AmbientLoopActive", true)
 
     local ang = self.CallDir:Angle()
@@ -671,10 +666,8 @@ function ENT:Update105mm(ct)
             shell.Shocktime = 8 shell.ShockForce = 1200
             shell.DEFAULT_PHYSFORCE_PLYGROUND = 1500
             shell.DEFAULT_PHYSFORCE_PLYAIR    = 80
-            -- Register this shell for EntityRemoved impact sound tracking
             local shellIdx = shell:EntIndex()
-            local plane    = self
-            Shells105[shellIdx] = { plane = plane }
+            Shells105[shellIdx] = { plane = self }
             local phys = shell:GetPhysicsObject()
             if IsValid(phys) then phys:EnableGravity(true) phys:SetVelocity(dir * self.GUN105_ShellVelocity) end
         end
