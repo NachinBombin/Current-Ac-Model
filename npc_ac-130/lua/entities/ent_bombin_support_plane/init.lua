@@ -27,6 +27,10 @@ local GAU_BRRT_SOUNDS = {
 
 local SOUND_105_IMPACT = "killstreak_explosions/105_explosion.wav"
 
+-- Peaceful mode timing (seconds)
+local PEACEFUL_MIN = 4
+local PEACEFUL_MAX = 7
+
 -- ============================================================
 -- SPATIAL PER-PLAYER SOUND SYSTEM
 -- ============================================================
@@ -246,9 +250,6 @@ function ENT:Initialize()
         self.PhysObj:EnableGravity(false)
     end
 
-    -- Ambient engine loop — same pattern as ent_bombin_support_heli.
-    -- CreateSound on a server entity is automatically 3D-positioned
-    -- for all clients by the Source engine. No net messages needed.
     self.IdleLoop = CreateSound(self, "ac-130_kill_sounds/AC130_idle_inside.mp3")
     if self.IdleLoop then self.IdleLoop:SetSoundLevel(60) self.IdleLoop:Play() end
 
@@ -277,6 +278,7 @@ function ENT:Initialize()
     self.IsDestroyed        = false
     self.DamageTier         = 0
     self.JASSM_DeployCount  = 0
+    -- Peaceful mode state
     self.IsPeaceful         = false
     self.PeacefulUntil      = 0
 
@@ -388,11 +390,35 @@ function ENT:PhysicsUpdate(phys)
     phys:SetVelocity(vel)
 end
 
+-- ============================================================
+-- WEAPON CYCLE WITH PEACEFUL MODE
+-- ============================================================
+
 function ENT:HandleWeaponWindow(ct)
-    if not self.CurrentWeapon or ct >= self.WeaponWindowEnd then
-        self:PickNewWeapon(ct)
+    -- Gate 1: currently in a peaceful cooldown — do nothing
+    if self.IsPeaceful then
+        if ct >= self.PeacefulUntil then
+            -- Peaceful window expired — arm the pre-chosen weapon
+            self.IsPeaceful = false
+            self:ArmWeapon(self._PendingWeapon, ct)
+            self._PendingWeapon = nil
+        end
         return
     end
+
+    -- Gate 2: no weapon active yet (first call after spawn or race guard)
+    if not self.CurrentWeapon then
+        self:EnterPeaceful(ct)
+        return
+    end
+
+    -- Gate 3: active weapon window has expired — enter peaceful cooldown
+    if ct >= self.WeaponWindowEnd then
+        self:EnterPeaceful(ct)
+        return
+    end
+
+    -- Gate 4: dispatch to the active weapon updater
     if     self.CurrentWeapon == "25mm"       then self:Update25mmBurstsSchedule(ct)
     elseif self.CurrentWeapon == "40mm"       then self:Update40mm(ct)
     elseif self.CurrentWeapon == "105mm"      then self:Update105mm(ct)
@@ -400,22 +426,43 @@ function ENT:HandleWeaponWindow(ct)
     elseif self.CurrentWeapon == "jassm"      then self:UpdateJASSM(ct) end
 end
 
-function ENT:PickNewWeapon(ct)
+-- Called at the end of every weapon window to begin the peaceful cooldown.
+function ENT:EnterPeaceful(ct)
     self:StopSprayLoop()
+    self.CurrentWeapon  = nil
+    self.IsPeaceful     = true
+    self.PeacefulUntil  = ct + math.Rand(PEACEFUL_MIN, PEACEFUL_MAX)
+    -- Pre-roll the next weapon so it is ready the moment the cooldown ends.
+    self._PendingWeapon = self:RollWeapon()
+    self:Debug("Peaceful mode for " .. string.format("%.1f", self.PeacefulUntil - ct) .. "s, next: " .. self._PendingWeapon)
+end
+
+-- Rolls and returns a random weapon name string.
+function ENT:RollWeapon()
     local roll = math.random(1, 5)
-    if     roll == 1 then self.CurrentWeapon = "25mm"
-    elseif roll == 2 then self.CurrentWeapon = "40mm"
-    elseif roll == 3 then self.CurrentWeapon = "105mm"
-    elseif roll == 4 then self.CurrentWeapon = "25mm_spray"
-    else                   self.CurrentWeapon = "jassm" end
+    if     roll == 1 then return "25mm"
+    elseif roll == 2 then return "40mm"
+    elseif roll == 3 then return "105mm"
+    elseif roll == 4 then return "25mm_spray"
+    else                   return "jassm" end
+end
+
+-- Arms a weapon and opens its fire window.  Called when the peaceful
+-- cooldown expires.
+function ENT:ArmWeapon(weapon, ct)
+    weapon = weapon or self:RollWeapon()
+    self.CurrentWeapon   = weapon
     self.WeaponWindowEnd = ct + self.WeaponWindow
-    self:Debug("Picked weapon: " .. self.CurrentWeapon)
-    if self.MuzzleIndexGlobal < 1 or self.MuzzleIndexGlobal > #self.MuzzlePoints then self.MuzzleIndexGlobal = 1 end
+    self:Debug("Armed: " .. self.CurrentWeapon)
+
+    if self.MuzzleIndexGlobal < 1 or self.MuzzleIndexGlobal > #self.MuzzlePoints then
+        self.MuzzleIndexGlobal = 1
+    end
     self.MuzzleIndexWeapon = self.MuzzleIndexGlobal
 
     if self.CurrentWeapon == "25mm" then
-        self.GAU_BurstTimes  = { ct + self.GAU_FirstBurstTime, ct + self.GAU_SecondBurstTime }
-        self.GAU_BurstsFired = 0
+        self.GAU_BurstTimes   = { ct + self.GAU_FirstBurstTime, ct + self.GAU_SecondBurstTime }
+        self.GAU_BurstsFired  = 0
         self.GAU_ActiveBursts = {}
     elseif self.CurrentWeapon == "40mm" then
         self.NextShotTime40 = ct + 0.3
@@ -431,8 +478,19 @@ function ENT:PickNewWeapon(ct)
         sweepDir:Normalize()
         self.GAU_SweepStartPos = targetPos - sweepDir * self.GAU_SweepHalfLength
         self.GAU_SweepEndPos   = targetPos + sweepDir * self.GAU_SweepHalfLength
+    elseif self.CurrentWeapon == "jassm" then
+        self.JASSM_Fired = false
     end
 end
+
+-- Legacy shim kept for external callers / subclasses.
+function ENT:PickNewWeapon(ct)
+    self:EnterPeaceful(ct)
+end
+
+-- ============================================================
+-- SPRAY LOOP HELPERS
+-- ============================================================
 
 function ENT:StartSprayLoop(soundPath) self.NextSpraySoundTime = CurTime() end
 function ENT:StopSprayLoop() self.NextSpraySoundTime = 0 end
