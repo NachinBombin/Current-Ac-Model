@@ -3,34 +3,16 @@ include("shared.lua")
 local mat_beam = Material("effects/laser1")
 local mat_glow = Material("sprites/light_glow02_add")
 
-local MUZZLE_VEL       = 85000
-local MAX_DIST         = 22000
-local MIN_SPEED        = 200
--- Use real speed of sound for impact cracks: they come from ground level
--- where the player can see them clearly. Exaggerated delay here would
--- feel broken rather than cinematic.
-local IMPACT_SND_SPEED = 34300
+local MUZZLE_VEL = 85000
+local MAX_DIST   = 22000
+local MIN_SPEED  = 200
 
-local IMPACT_SOUNDS = {
-    "physics/concrete/impact_bullet1.wav",
-    "physics/concrete/impact_bullet2.wav",
-    "physics/concrete/impact_bullet3.wav",
-    "physics/dirt/impact_bullet1.wav",
-    "physics/dirt/impact_bullet2.wav",
-    "physics/dirt/impact_bullet3.wav",
-    "physics/metal/metal_solid_impact_bullet1.wav",
-    "physics/metal/metal_solid_impact_bullet2.wav",
-    "physics/metal/metal_solid_impact_bullet3.wav",
+bombin_gau_store = bombin_gau_store or {
+    last_idx           = 0,
+    buffer_size        = 128,
+    buffer             = {},
+    active_projectiles = {},
 }
-
--- Guard: always ensure pending_sounds exists even if the global
--- was created by a previous map load that predates this field.
-bombin_gau_store = bombin_gau_store or {}
-bombin_gau_store.last_idx           = bombin_gau_store.last_idx           or 0
-bombin_gau_store.buffer_size        = bombin_gau_store.buffer_size        or 128
-bombin_gau_store.buffer             = bombin_gau_store.buffer             or {}
-bombin_gau_store.active_projectiles = bombin_gau_store.active_projectiles or {}
-bombin_gau_store.pending_sounds     = bombin_gau_store.pending_sounds     or {}
 
 if #bombin_gau_store.buffer == 0 then
     for i = 1, bombin_gau_store.buffer_size do
@@ -77,8 +59,7 @@ local tick_interval = engine.TickInterval()
 local last_tick     = engine.TickCount()
 
 local function move_cl()
-    local store  = bombin_gau_store
-    local active = store.active_projectiles
+    local active = bombin_gau_store.active_projectiles
     local count  = #active
     local idx    = 1
     while idx <= count do
@@ -90,32 +71,11 @@ local function move_cl()
         else
             local step    = proj.dir * (proj.speed * tick_interval)
             local new_pos = proj.pos + step
-
-            local tr = util.TraceLine({
-                start  = proj.pos,
-                endpos = new_pos,
-                mask   = MASK_SHOT,
-            })
-
-            if tr.Hit and not tr.HitSky then
-                proj.hit = true
-                local hitPos = tr.HitPos
-                local dist   = EyePos():Distance(hitPos)
-                local delay  = dist / IMPACT_SND_SPEED
-                local snd    = IMPACT_SOUNDS[math.random(#IMPACT_SOUNDS)]
-                local ps     = store.pending_sounds
-                ps[#ps + 1]  = {
-                    snd    = snd,
-                    pos    = hitPos,
-                    playAt = UnPredictedCurTime() + delay,
-                }
-            else
-                proj.old_vel  = proj.vel
-                proj.old_pos  = proj.pos
-                proj.vel      = step
-                proj.pos      = new_pos
-                proj.distance_traveled = proj.distance_traveled + step:Length()
-            end
+            proj.old_vel  = proj.vel
+            proj.old_pos  = proj.pos
+            proj.vel      = step
+            proj.pos      = new_pos
+            proj.distance_traveled = proj.distance_traveled + step:Length()
             idx = idx + 1
         end
     end
@@ -126,24 +86,6 @@ hook.Add("CreateMove", "bombin_gau_move_cl", function()
     if t > last_tick then
         last_tick = t
         move_cl()
-    end
-end)
-
--- Drain pending impact sounds each frame.
--- Level 255: disables distance cutoff on client-side sound.Play.
-hook.Add("Think", "bombin_gau_impact_sounds", function()
-    local ps  = bombin_gau_store.pending_sounds
-    local now = UnPredictedCurTime()
-    local i   = 1
-    while i <= #ps do
-        local e = ps[i]
-        if now >= e.playAt then
-            sound.Play(e.snd, e.pos, 255, math.random(95, 105), 1.0)
-            ps[i] = ps[#ps]
-            ps[#ps] = nil
-        else
-            i = i + 1
-        end
     end
 end)
 
