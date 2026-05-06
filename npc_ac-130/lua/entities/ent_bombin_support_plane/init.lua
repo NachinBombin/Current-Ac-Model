@@ -6,12 +6,6 @@ local function HasGred()
     return gred and gred.CreateBullet and gred.CreateShell
 end
 
-local PASS_SOUNDS = {
-    "killstreak_rewards/ac-130_105mm_fire.wav",
-    "killstreak_rewards/ac-130_40mm_fire.wav",
-    "killstreak_rewards/ac-130_25mm_fire.wav",
-}
-
 local GAU_IMPACT_SOUNDS = {
     "physics/concrete/impact_bullet1.wav",
     "physics/concrete/impact_bullet2.wav",
@@ -35,68 +29,34 @@ local GAU_CAL_ID = 3
 
 -- ============================================================
 -- SPATIAL PER-PLAYER SOUND SYSTEM
--- Speed of sound in GMod units: 4200 u/s (roughly 343 m/s
--- with the standard GMod unit scale of ~0.01905 m/u).
+-- Speed of sound in GMod units: 4200 u/s.
 --
--- For each weapon discharge the server iterates every connected
--- player and schedules a delayed net message that fires after
--- the acoustic travel time (dist / 4200) for that player.
--- The sound is played client-side very close to the player
--- (NEAR_OFFSET units toward the plane) so GMod's engine
--- attenuation does not re-attenuate it – volume is instead
--- driven by our own falloff curve.
+-- Each weapon fires exactly one EmitSpatialSound call per shot.
+-- No ambient pass-sound logic exists; sounds are only emitted
+-- by the weapon function that actually fired.
 --
 -- Volume falloff (near-zero / almost flat):
 --   vol = baseVol * (1 - dist/MAX_HEAR_DIST) ^ VOL_FALLOFF_EXP
---
---   VOL_FALLOFF_EXP = 0.08  ->  at max range (18 000 u) vol ≈ 94% of base.
---   The exponent is intentionally tiny so the delay and
---   directional cue matter far more than loudness difference.
---
--- Sounds are played at  playerPos + towardPlane * NEAR_OFFSET
--- so the Source engine still gives them a subtle directional cue
--- without distance-based engine attenuation kicking in.
+--   VOL_FALLOFF_EXP = 0.08  ->  ~94% vol at max range (18 000 u).
 -- ============================================================
 
 util.AddNetworkString("bombin_plane_damage_tier")
 util.AddNetworkString("bombin_plane_spatial_sound")
 
-local SOUND_SPEED        = 4200   -- Source units per second
-local MAX_HEAR_DIST      = 18000  -- Beyond this: inaudible
-local VOL_FALLOFF_EXP    = 0.08   -- Near-zero falloff; ~94% vol at max range
-local NEAR_OFFSET        = 40     -- Units toward plane; keeps sound near-ear
+local SOUND_SPEED        = 4200
+local MAX_HEAR_DIST      = 18000
+local VOL_FALLOFF_EXP    = 0.08
+local NEAR_OFFSET        = 40
 
--- Precache all weapon sounds so clients never stutter on first play
 local function PrecacheWeaponSounds()
-    for _, s in ipairs(PASS_SOUNDS)      do util.PrecacheSound(s) end
-    for _, s in ipairs(GAU_BRRT_SOUNDS)  do util.PrecacheSound(s) end
+    for _, s in ipairs(GAU_BRRT_SOUNDS) do util.PrecacheSound(s) end
     util.PrecacheSound("killstreak_rewards/ac-130_40mm_fire.wav")
     util.PrecacheSound("killstreak_rewards/ac-130_105mm_fire.wav")
-    util.PrecacheSound("killstreak_rewards/ac-130_25mm_fire.wav")
 end
 PrecacheWeaponSounds()
 
--- pending_sounds: list of { sendTime, ply, soundPath, nearPos, soundLevel, pitch, volume }
--- Flushed every Think tick.
 local pending_sounds = {}
 
---[[
-    ENT:EmitSpatialSound( soundPath, originPos, soundLevel, pitch, baseVol )
-
-    originPos  - where the gun actually fired (the plane position or muzzle).
-    soundLevel - attenuation hint sent to client (kept LOW because we
-                 play it near the player; use 60-75 to keep it local).
-    pitch      - pitch value, e.g. math.random(96,104).
-    baseVol    - volume at point-blank range (1.0 = full).
-
-    For each living player:
-      1. Compute distance from player to originPos.
-      2. If distance > MAX_HEAR_DIST, skip.
-      3. vol = baseVol * (1 - dist/MAX_HEAR_DIST)^VOL_FALLOFF_EXP  (near-flat curve)
-      4. Compute delay   = distance / SOUND_SPEED.
-      5. Compute nearPos = playerPos + normalize(originPos-playerPos)*NEAR_OFFSET
-      6. Schedule net send at CurTime() + delay.
-]]
 function ENT:EmitSpatialSound( soundPath, originPos, soundLevel, pitch, baseVol )
     local sendAt = CurTime()
     for _, ply in ipairs( player.GetAll() ) do
@@ -108,12 +68,9 @@ function ENT:EmitSpatialSound( soundPath, originPos, soundLevel, pitch, baseVol 
 
         if dist > MAX_HEAR_DIST then continue end
 
-        -- Near-zero power-curve falloff: exponent 0.08 gives ~94% vol at max range
-        local t   = dist / MAX_HEAR_DIST          -- 0 (close) → 1 (max range)
+        local t   = dist / MAX_HEAR_DIST
         local vol = baseVol * ( 1 - t ) ^ VOL_FALLOFF_EXP
 
-        -- Position the sound NEAR_OFFSET units toward the plane,
-        -- right next to the player so engine attenuation is ~0.
         local nearPos
         if dist > 0.1 then
             nearPos = plyPos + ( toPlane / dist ) * NEAR_OFFSET
@@ -121,7 +78,6 @@ function ENT:EmitSpatialSound( soundPath, originPos, soundLevel, pitch, baseVol 
             nearPos = plyPos
         end
 
-        -- Acoustic travel delay
         local delay = dist / SOUND_SPEED
 
         pending_sounds[ #pending_sounds + 1 ] = {
@@ -136,11 +92,10 @@ function ENT:EmitSpatialSound( soundPath, originPos, soundLevel, pitch, baseVol 
     end
 end
 
--- Flush pending sounds in Think so we don't miss any ticks
 local function FlushPendingSounds()
     if #pending_sounds == 0 then return end
-    local ct    = CurTime()
-    local keep  = {}
+    local ct   = CurTime()
+    local keep = {}
     for _, entry in ipairs( pending_sounds ) do
         if ct >= entry.sendTime then
             if IsValid( entry.ply ) then
@@ -238,7 +193,6 @@ function ENT:Initialize()
     self.sky       = ground + self.SkyHeightAdd
     self.DieTime   = CurTime() + self.Lifetime
     self.SpawnTime = CurTime()
-    self.NextPassSound = CurTime() + math.Rand(3, 6)
 
     local spawnPos = self.CenterPos - self.CallDir * 2000
     spawnPos = Vector(spawnPos.x, spawnPos.y, self.sky)
@@ -286,8 +240,6 @@ function ENT:Initialize()
     self.PlaneAmbientLoop = CreateSound(self, self.Plane_Ambient_SoundPath)
     if self.PlaneAmbientLoop then self.PlaneAmbientLoop:SetSoundLevel(80) self.PlaneAmbientLoop:Play() end
 
-    self.NextSpraySoundTime = 0
-    self:EmitSpatialSound( table.Random(PASS_SOUNDS), self:GetPos(), 75, 100, 0.7 )
     self:Debug("Spawned at " .. tostring(spawnPos))
 
     self.CurrentWeapon      = nil
@@ -295,6 +247,7 @@ function ENT:Initialize()
     self.NextShotTime40     = 0
     self.NextShotTime105    = 0
     self.NextShotTimeSpray  = 0
+    self.NextSpraySoundTime = 0
     self.SprayBulletCount   = 0
     self.GAU_BurstTimes     = {}
     self.GAU_BurstsFired    = 0
@@ -365,17 +318,6 @@ function ENT:Think()
     if ct >= self.DieTime then self:Remove() return end
     if not IsValid(self.PhysObj) then self.PhysObj = self:GetPhysicsObject() end
     if IsValid(self.PhysObj) and self.PhysObj:IsAsleep() then self.PhysObj:Wake() end
-
-    if ct >= self.NextPassSound then
-        self:EmitSpatialSound(
-            table.Random(PASS_SOUNDS),
-            self:GetPos(),
-            75,
-            math.random(96, 104),
-            0.7
-        )
-        self.NextPassSound = ct + math.Rand(4, 7)
-    end
 
     FlushPendingSounds()
     self:HandleWeaponWindow(ct)
@@ -554,8 +496,8 @@ function ENT:FireGAUBulletAt(muzzlePos, impactPos, bulletIndex)
     if not IsValid(bullet) then return end
     bullet:SetPos(muzzlePos)
     bullet:SetAngles(dir:Angle())
-    bullet.Firer      = self
-    bullet.MuzzlePos  = muzzlePos
+    bullet.Firer       = self
+    bullet.MuzzlePos   = muzzlePos
     bullet.BulletIndex = bulletIndex or 1
     bullet.HEIInterval = self.GAU_HEI_Interval
     bullet.BulletRad   = self.GAU_BlastRadius
