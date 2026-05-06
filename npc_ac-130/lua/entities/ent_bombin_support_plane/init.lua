@@ -28,6 +28,12 @@ local GAU_BRRT_SOUNDS = {
 local SOUND_105_IMPACT = "killstreak_explosions/105_explosion.wav"
 
 -- ============================================================
+-- PEACEFUL MODE CONFIG
+-- ============================================================
+local CFG_PeacefulMin = 3
+local CFG_PeacefulMax = 5
+
+-- ============================================================
 -- SPATIAL PER-PLAYER SOUND SYSTEM
 -- ============================================================
 
@@ -255,6 +261,10 @@ function ENT:Initialize()
     self.DamageTier         = 0
     self.JASSM_DeployCount  = 0
 
+    -- Peaceful mode state
+    self.IsPeaceful    = false
+    self.PeacefulUntil = 0
+
     if not HasGred() then self:Debug("WARNING: Gred base not found; falling back to rpg_missile.") end
 end
 
@@ -363,40 +373,58 @@ function ENT:PhysicsUpdate(phys)
     phys:SetVelocity(vel)
 end
 
-function ENT:HandleWeaponWindow(ct)
-    if not self.CurrentWeapon or ct >= self.WeaponWindowEnd then
-        self:PickNewWeapon(ct)
-        return
-    end
-    if     self.CurrentWeapon == "25mm"       then self:Update25mmBurstsSchedule(ct)
-    elseif self.CurrentWeapon == "40mm"       then self:Update40mm(ct)
-    elseif self.CurrentWeapon == "105mm"      then self:Update105mm(ct)
-    elseif self.CurrentWeapon == "25mm_spray" then self:Update25mmSpray(ct)
-    elseif self.CurrentWeapon == "jassm"      then self:UpdateJASSM(ct) end
+-- ============================================================
+-- PEACEFUL MODE
+-- ============================================================
+
+-- EnterPeaceful: called at the END of every weapon window.
+-- Suppresses all firing for a random 3–5 second window, then
+-- arms the next weapon via timer.Simple (same pattern as B-52).
+function ENT:EnterPeaceful(ct)
+    self:StopSprayLoop()
+    self.IsPeaceful    = true
+    self.PeacefulUntil = ct + math.Rand(CFG_PeacefulMin, CFG_PeacefulMax)
+    self.CurrentWeapon = nil
+
+    -- Pick the next weapon now so it is decided before the timer fires.
+    local roll = math.random(1, 5)
+    local choice
+    if     roll == 1 then choice = "25mm"
+    elseif roll == 2 then choice = "40mm"
+    elseif roll == 3 then choice = "105mm"
+    elseif roll == 4 then choice = "25mm_spray"
+    else                   choice = "jassm" end
+
+    self:Debug("Peaceful until +" .. string.format("%.1f", self.PeacefulUntil - ct) .. "s, next=" .. choice)
+
+    timer.Simple(self.PeacefulUntil - ct, function()
+        if not IsValid(self) or self.IsDestroyed then return end
+        self.IsPeaceful   = false
+        self:ArmWeapon(choice, CurTime())
+    end)
 end
 
-function ENT:PickNewWeapon(ct)
-    self:StopSprayLoop()
-    local roll = math.random(1, 5)
-    if     roll == 1 then self.CurrentWeapon = "25mm"
-    elseif roll == 2 then self.CurrentWeapon = "40mm"
-    elseif roll == 3 then self.CurrentWeapon = "105mm"
-    elseif roll == 4 then self.CurrentWeapon = "25mm_spray"
-    else                   self.CurrentWeapon = "jassm" end
+-- ArmWeapon: sets all per-weapon state and opens the fire window.
+-- Extracted from PickNewWeapon so EnterPeaceful can call it after the delay.
+function ENT:ArmWeapon(choice, ct)
+    self.CurrentWeapon   = choice
     self.WeaponWindowEnd = ct + self.WeaponWindow
-    self:Debug("Picked weapon: " .. self.CurrentWeapon)
-    if self.MuzzleIndexGlobal < 1 or self.MuzzleIndexGlobal > #self.MuzzlePoints then self.MuzzleIndexGlobal = 1 end
+    self:Debug("Armed: " .. self.CurrentWeapon)
+
+    if self.MuzzleIndexGlobal < 1 or self.MuzzleIndexGlobal > #self.MuzzlePoints then
+        self.MuzzleIndexGlobal = 1
+    end
     self.MuzzleIndexWeapon = self.MuzzleIndexGlobal
 
-    if self.CurrentWeapon == "25mm" then
-        self.GAU_BurstTimes  = { ct + self.GAU_FirstBurstTime, ct + self.GAU_SecondBurstTime }
-        self.GAU_BurstsFired = 0
+    if choice == "25mm" then
+        self.GAU_BurstTimes   = { ct + self.GAU_FirstBurstTime, ct + self.GAU_SecondBurstTime }
+        self.GAU_BurstsFired  = 0
         self.GAU_ActiveBursts = {}
-    elseif self.CurrentWeapon == "40mm" then
+    elseif choice == "40mm" then
         self.NextShotTime40 = ct + 0.3
-    elseif self.CurrentWeapon == "105mm" then
+    elseif choice == "105mm" then
         self.NextShotTime105 = ct + 0.5
-    elseif self.CurrentWeapon == "25mm_spray" then
+    elseif choice == "25mm_spray" then
         self.NextShotTimeSpray  = ct
         self.NextSpraySoundTime = ct
         self.SprayBulletCount   = 0
@@ -406,7 +434,53 @@ function ENT:PickNewWeapon(ct)
         sweepDir:Normalize()
         self.GAU_SweepStartPos = targetPos - sweepDir * self.GAU_SweepHalfLength
         self.GAU_SweepEndPos   = targetPos + sweepDir * self.GAU_SweepHalfLength
+    elseif choice == "jassm" then
+        self.JASSM_Fired = false
     end
+end
+
+-- ============================================================
+-- WEAPON WINDOW DISPATCHER
+-- ============================================================
+
+function ENT:HandleWeaponWindow(ct)
+    -- Still in peaceful cooldown — do nothing.
+    if self.IsPeaceful then return end
+
+    -- No weapon yet (first call, or timer race guard) → arm immediately.
+    if not self.CurrentWeapon then
+        self:ArmWeapon(self:RollNewWeapon(), ct)
+        return
+    end
+
+    -- Weapon window expired → enter peaceful cooldown.
+    if ct >= self.WeaponWindowEnd then
+        self:EnterPeaceful(ct)
+        return
+    end
+
+    -- Active fire window — dispatch to the weapon updater.
+    if     self.CurrentWeapon == "25mm"       then self:Update25mmBurstsSchedule(ct)
+    elseif self.CurrentWeapon == "40mm"       then self:Update40mm(ct)
+    elseif self.CurrentWeapon == "105mm"      then self:Update105mm(ct)
+    elseif self.CurrentWeapon == "25mm_spray" then self:Update25mmSpray(ct)
+    elseif self.CurrentWeapon == "jassm"      then self:UpdateJASSM(ct) end
+end
+
+-- RollNewWeapon: pure helper, returns a weapon string without touching state.
+function ENT:RollNewWeapon()
+    local roll = math.random(1, 5)
+    if     roll == 1 then return "25mm"
+    elseif roll == 2 then return "40mm"
+    elseif roll == 3 then return "105mm"
+    elseif roll == 4 then return "25mm_spray"
+    else                   return "jassm" end
+end
+
+-- PickNewWeapon kept for back-compat (any external caller that may reference it).
+-- Now simply delegates to EnterPeaceful.
+function ENT:PickNewWeapon(ct)
+    self:EnterPeaceful(ct)
 end
 
 function ENT:StartSprayLoop(soundPath) self.NextSpraySoundTime = CurTime() end
