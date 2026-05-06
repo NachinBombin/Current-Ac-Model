@@ -46,25 +46,25 @@ local GAU_CAL_ID = 3
 -- attenuation does not re-attenuate it – volume is instead
 -- driven by our own falloff curve.
 --
--- Volume falloff:  vol = base_vol * (1 - dist / MAX_HEAR_DIST)
---   clamped [MIN_VOL, base_vol].  This is linear, intentionally
---   simple so it matches what a real far-away gun sounds like
---   (the loudness difference between 3 000 u and 12 000 u is
---   dramatic, not subtle).
+-- Volume falloff (near-zero / almost flat):
+--   vol = baseVol * (1 - dist/MAX_HEAR_DIST) ^ VOL_FALLOFF_EXP
+--
+--   VOL_FALLOFF_EXP = 0.08  ->  at max range (18 000 u) vol ≈ 94% of base.
+--   The exponent is intentionally tiny so the delay and
+--   directional cue matter far more than loudness difference.
 --
 -- Sounds are played at  playerPos + towardPlane * NEAR_OFFSET
 -- so the Source engine still gives them a subtle directional cue
--- (the sound subtly "comes from above") without distance-based
--- engine attenuation kicking in.
+-- without distance-based engine attenuation kicking in.
 -- ============================================================
 
 util.AddNetworkString("bombin_plane_damage_tier")
 util.AddNetworkString("bombin_plane_spatial_sound")
 
-local SOUND_SPEED      = 4200   -- Source units per second
-local MAX_HEAR_DIST    = 18000  -- Beyond this: inaudible
-local MIN_VOL          = 0.05   -- Floor volume at max range
-local NEAR_OFFSET      = 40     -- Units toward plane; keeps sound near-ear
+local SOUND_SPEED        = 4200   -- Source units per second
+local MAX_HEAR_DIST      = 18000  -- Beyond this: inaudible
+local VOL_FALLOFF_EXP    = 0.08   -- Near-zero falloff; ~94% vol at max range
+local NEAR_OFFSET        = 40     -- Units toward plane; keeps sound near-ear
 
 -- Precache all weapon sounds so clients never stutter on first play
 local function PrecacheWeaponSounds()
@@ -92,7 +92,7 @@ local pending_sounds = {}
     For each living player:
       1. Compute distance from player to originPos.
       2. If distance > MAX_HEAR_DIST, skip.
-      3. Compute volume = linear falloff between baseVol and MIN_VOL.
+      3. vol = baseVol * (1 - dist/MAX_HEAR_DIST)^VOL_FALLOFF_EXP  (near-flat curve)
       4. Compute delay   = distance / SOUND_SPEED.
       5. Compute nearPos = playerPos + normalize(originPos-playerPos)*NEAR_OFFSET
       6. Schedule net send at CurTime() + delay.
@@ -108,9 +108,9 @@ function ENT:EmitSpatialSound( soundPath, originPos, soundLevel, pitch, baseVol 
 
         if dist > MAX_HEAR_DIST then continue end
 
-        -- Linear volume falloff
-        local vol = baseVol * ( 1 - ( dist / MAX_HEAR_DIST ) )
-        vol = math.Clamp( vol, MIN_VOL, baseVol )
+        -- Near-zero power-curve falloff: exponent 0.08 gives ~94% vol at max range
+        local t   = dist / MAX_HEAR_DIST          -- 0 (close) → 1 (max range)
+        local vol = baseVol * ( 1 - t ) ^ VOL_FALLOFF_EXP
 
         -- Position the sound NEAR_OFFSET units toward the plane,
         -- right next to the player so engine attenuation is ~0.
