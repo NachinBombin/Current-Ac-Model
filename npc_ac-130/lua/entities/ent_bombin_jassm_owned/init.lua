@@ -3,10 +3,13 @@
 -- Spawned exclusively by ent_bombin_support_plane:UpdateJASSM().
 -- No menu / no admin spawner.
 --
--- When self.SpawnedFromPlane == true the missile was placed at the
--- AC-130's tail by UpdateJASSM() before Spawn() was called.
--- Initialize() skips the orbit-entry math and uses self:GetPos()
--- as the freefall start position directly.
+-- Freefall phase uses MOVETYPE_NONE so we own the velocity completely.
+-- We apply gravity manually each Think() tick and subtract a drag force
+-- proportional to downward speed to produce true parachute dampening.
+-- At FREEFALL_MAX_FALL the drag exactly cancels gravity = terminal velocity.
+--
+-- Ignition fires when pos.z reaches self.sky (checked every Think tick at
+-- FREEFALL_THINK_DT = 1/66 s so overshoot is at most ~5 u).
 
 AddCSLuaFile("cl_init.lua")
 AddCSLuaFile("shared.lua")
@@ -26,10 +29,18 @@ local SHARD_MODEL       = "models/props_c17/FurnitureDrawer001a_Shard01.mdl"
 local GRAVITY_MULT      = 1.5
 local SHARD_LIFE        = 8
 
-local FREEFALL_DROP     = 900   -- must match JASSM_FREEFALL_DROP in support_plane/init.lua
-local FREEFALL_MAX_FALL = 320   -- terminal velocity cap (u/s downward)
+-- Freefall physics constants.
+-- GRAVITY         : Source default (600 u/s²) applied manually each tick.
+-- FREEFALL_MAX_FALL: terminal velocity downward (u/s).  Drag coefficient is
+--                   derived so that at this speed drag == gravity, giving
+--                   a true asymptotic terminal velocity.
+-- FREEFALL_THINK_DT: Think() interval during freefall (≈66 Hz).
+local FREEFALL_GRAVITY    = 600
+local FREEFALL_MAX_FALL   = 320
+local FREEFALL_DRAG_K     = FREEFALL_GRAVITY / FREEFALL_MAX_FALL  -- k = g / v_terminal
+local FREEFALL_THINK_DT   = 1 / 66
 
-local CHUTE_ABOVE = 105   -- chute floats this many units above the missile origin
+local CHUTE_ABOVE = 105   -- chute floats this many units above missile origin
 
 ENT.WeaponWindow       = 8
 ENT.DIVE_Speed         = 2200
@@ -86,26 +97,19 @@ function ENT:Initialize()
 
 	-- ----------------------------------------------------------------
 	--  Spawn position
-	--
-	--  When SpawnedFromPlane is true, UpdateJASSM() already called
-	--  jassm:SetPos(tailPos) before Spawn().  We just use that.
-	--
-	--  When spawned standalone (testing / other callers) we compute a
-	--  sensible orbit-entry position as before.
 	-- ----------------------------------------------------------------
 	local spawnPos
 
 	if self.SpawnedFromPlane then
-		-- Position was set by the AC-130 before Spawn() -- use it directly.
 		spawnPos = self:GetPos()
 		self:Debug("SpawnedFromPlane: using tail pos " .. tostring(spawnPos))
 	else
 		local entryRad    = self.OrbitAngle
 		local entryOffset = Vector(math.cos(entryRad), math.sin(entryRad), 0)
 		local orbitXY     = self.CenterPos + entryOffset * (self.OrbitRadius * 1.05)
-		spawnPos = Vector(orbitXY.x, orbitXY.y, self.sky + FREEFALL_DROP)
+		spawnPos = Vector(orbitXY.x, orbitXY.y, self.sky + 900)
 		if not util.IsInWorld(spawnPos) then
-			spawnPos = Vector(self.CenterPos.x, self.CenterPos.y, self.sky + FREEFALL_DROP)
+			spawnPos = Vector(self.CenterPos.x, self.CenterPos.y, self.sky + 900)
 		end
 		self:Debug("Standalone: orbit-entry spawn " .. tostring(spawnPos))
 	end
@@ -122,8 +126,10 @@ function ENT:Initialize()
 	self:SetRenderMode(RENDERMODE_NORMAL)
 	self:SetPos(spawnPos)
 
-	self:SetMoveType(MOVETYPE_FLYGRAVITY)
-	self:SetSolid(SOLID_BBOX)
+	-- MOVETYPE_NONE: we own every byte of velocity during freefall.
+	-- The engine will not apply gravity; we do it manually in Think().
+	self:SetMoveType(MOVETYPE_NONE)
+	self:SetSolid(SOLID_NONE)
 	self:SetCollisionGroup(COLLISION_GROUP_INTERACTIVE_DEBRIS)
 
 	self:SetNWInt("HP",         self.MaxHP)
@@ -162,6 +168,9 @@ function ENT:Initialize()
 	self.WanderRateY   = math.Rand(0.003, 0.009)
 
 	self.PhysObj = nil
+
+	-- Freefall state: velocity is tracked in self.FreefallVelZ (u/s, negative = downward).
+	self.FreefallVelZ  = 0
 
 	self.EngineLoop    = nil
 	self.NextPassSound = CurTime() + math.Rand(5, 10)
@@ -221,10 +230,11 @@ function ENT:IgniteEngine()
 	self.EngineIgnited = true
 	self:SetNWBool("EngineOn", true)
 
-	self:SetBodygroup(1, 1)
+	self:SetBodygroup(1, 1)   -- wings extended
 
 	local pos = self:GetPos()
 
+	-- Switch to VPHYSICS so PhysicsUpdate() can drive the orbit.
 	self:PhysicsInit(SOLID_VPHYSICS)
 	self:SetMoveType(MOVETYPE_VPHYSICS)
 	self:SetSolid(SOLID_VPHYSICS)
@@ -240,6 +250,7 @@ function ENT:IgniteEngine()
 		self.PhysObj:SetVelocity(fwd * self.Speed)
 	end
 
+	-- Ignition burst cloud
 	local ed = EffectData()
 	ed:SetOrigin(pos + self:GetForward() * -55)
 	ed:SetScale(2)
@@ -380,6 +391,7 @@ function ENT:Think()
 	local ct = CurTime()
 	if ct >= self.DieTime then self:Remove() return end
 
+	-- ---- Destroyed (pre-ignition or post-ignition) ----
 	if self:IsDestroyedState() then
 		if self.ExplodeTimer and ct >= self.ExplodeTimer then
 			self:CrashExplode(self:GetPos())
@@ -389,30 +401,54 @@ function ENT:Think()
 		return true
 	end
 
-	-- ---- Freefall phase ----
+	-- ================================================================
+	--  FREEFALL PHASE  (MOVETYPE_NONE, we own the velocity)
+	-- ================================================================
 	if not self.EngineIgnited then
-		local vel = self:GetVelocity()
+		local dt = FREEFALL_THINK_DT
 
-		if vel.z < -FREEFALL_MAX_FALL then
-			self:SetVelocity(Vector(vel.x, vel.y, -FREEFALL_MAX_FALL))
+		-- Step 1: apply gravity, then apply upward drag.
+		-- Net acceleration = -g + k*v  (v is negative when falling)
+		-- This gives true terminal velocity: at v = -g/k = -FREEFALL_MAX_FALL
+		-- drag exactly cancels gravity, acceleration goes to zero.
+		self.FreefallVelZ = self.FreefallVelZ - FREEFALL_GRAVITY * dt
+		local drag = FREEFALL_DRAG_K * (-self.FreefallVelZ)  -- drag magnitude (positive)
+		self.FreefallVelZ = self.FreefallVelZ + drag * dt
+
+		-- Hard clamp as a safety net (floating point drift).
+		if self.FreefallVelZ < -FREEFALL_MAX_FALL then
+			self.FreefallVelZ = -FREEFALL_MAX_FALL
 		end
 
+		-- Step 2: integrate position.
+		local pos = self:GetPos()
+		local newZ = pos.z + self.FreefallVelZ * dt
+		self:SetPos(Vector(pos.x, pos.y, newZ))
+
+		-- Step 3: nose-down attitude during freefall (cosmetic).
 		local ang = self:GetAngles()
 		self:SetAngles(Angle(
-			Lerp(0.08, ang.p, -15),
+			Lerp(0.12, ang.p, -15),
 			ang.y,
-			Lerp(0.08, ang.r, 0)
+			Lerp(0.12, ang.r, 0)
 		))
 
-		if self:GetPos().z <= self.sky then
+		-- Step 4: check for ignition altitude.
+		-- Use newZ so we never overshoot by more than one tick's travel.
+		if newZ <= self.sky then
+			-- Snap to ignition altitude before switching movetype.
+			self:SetPos(Vector(pos.x, pos.y, self.sky))
 			self:IgniteEngine()
+			-- Fall through to post-ignition logic below.
 		else
-			self:NextThink(ct + 0.05)
+			self:NextThink(ct + FREEFALL_THINK_DT)
 			return true
 		end
 	end
 
-	-- ---- Post-ignition ----
+	-- ================================================================
+	--  POST-IGNITION PHASE
+	-- ================================================================
 	if not IsValid(self.PhysObj) then
 		self.PhysObj = self:GetPhysicsObject()
 	end
