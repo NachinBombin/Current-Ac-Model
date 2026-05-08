@@ -288,12 +288,18 @@ function ENT:Initialize()
     self.MuzzleIndexWeapon  = 1
     self.IsDestroyed        = false
     self.DamageTier         = 0
-    -- Internal brain counter: total individual JASSMs launched this lifetime.
+    -- JASSM bay state - explicitly initialized here so no stale value
+    -- survives a hot-reload or entity table reuse.
     self.JASSM_DeployCount  = 0
-    self.JASSM_Stock        = JASSM_MAX_STOCK  -- missiles remaining in bay
+    self.JASSM_Stock        = JASSM_MAX_STOCK
+    self.JASSM_SalvoFired   = 0   -- CRITICAL: must be 0 here, not nil
     -- Peaceful mode state
     self.IsPeaceful         = false
     self.PeacefulUntil      = 0
+
+    -- NW vars so the client HUD can read them
+    self:SetNWInt("JASSM_Spent", 0)
+    self:SetNWInt("JASSM_Max",   JASSM_MAX_STOCK)
 
     if not HasGred() then self:Debug("WARNING: Gred base not found; falling back to rpg_missile.") end
 end
@@ -495,8 +501,8 @@ function ENT:ArmWeapon(weapon, ct)
         self.GAU_SweepStartPos = targetPos - sweepDir * self.GAU_SweepHalfLength
         self.GAU_SweepEndPos   = targetPos + sweepDir * self.GAU_SweepHalfLength
     elseif self.CurrentWeapon == "jassm" then
-        -- JASSM_SalvoFired: tracks how many missiles of THIS window's salvo have
-        -- been scheduled. Reset to 0 here so UpdateJASSM starts clean every arm.
+        -- Always reset to 0 (not nil) so the >= 1 guard in UpdateJASSM
+        -- works correctly on every arm, including the very first one.
         self.JASSM_SalvoFired = 0
     end
 end
@@ -777,9 +783,11 @@ end
 -- JASSM DEPLOYMENT
 -- ============================================================
 
+--
 -- Spawns one JASSM from the tail bay, consuming one unit of stock.
--- deployIdx is the 1-based index used for altitude staggering.
--- Returns true on success.
+-- deployIdx: 1-based index used only for altitude staggering.
+-- Returns true on success, false if the bay is empty or entity create fails.
+--
 function ENT:SpawnOneJASSM(deployIdx)
     if not scripted_ents.GetStored("ent_bombin_jassm_owned") then
         self:Debug("JASSM: ent_bombin_jassm_owned not registered, skipping")
@@ -791,14 +799,12 @@ function ENT:SpawnOneJASSM(deployIdx)
         return false
     end
 
-    -- Altitude stagger: each successive JASSM starts slightly lower.
     local maxDeploys = math.floor(self.SkyHeightAdd / self.JASSM_AltOffset)
     local clampedIdx = math.min(deployIdx, maxDeploys)
     local jassmAlt   = self.sky - (clampedIdx * self.JASSM_AltOffset)
 
     local tailWorld = self:LocalToWorld(self.JASSM_TailOffset)
     local spawnPos  = Vector(tailWorld.x, tailWorld.y, jassmAlt)
-
     if not util.IsInWorld(spawnPos) then
         spawnPos = Vector(self.CenterPos.x, self.CenterPos.y, jassmAlt)
     end
@@ -823,86 +829,94 @@ function ENT:SpawnOneJASSM(deployIdx)
     jassm:Spawn()
     jassm:Activate()
 
-    -- Consume one missile from the internal bay counter.
     self.JASSM_Stock       = self.JASSM_Stock - 1
     self.JASSM_DeployCount = self.JASSM_DeployCount + 1
+    self:SetNWInt("JASSM_Spent", JASSM_MAX_STOCK - self.JASSM_Stock)
 
-    self:Debug(string.format("JASSM #%d deployed at %s alt=%.0f  stock=%d",
-        self.JASSM_DeployCount, tostring(spawnPos), jassmAlt, self.JASSM_Stock))
+    self:Debug(string.format("JASSM #%d deployed  alt=%.0f  stock=%d",
+        self.JASSM_DeployCount, jassmAlt, self.JASSM_Stock))
     return true
 end
 
 -- ============================================================
--- UpdateJASSM
+-- UpdateJASSM  (SERVER realm)
 --
 -- Called every Think() tick while CurrentWeapon == "jassm".
--- JASSM_SalvoFired tracks how many missiles of this weapon
--- window have been *scheduled* (not just the first one).
 --
--- Bug-fixes vs previous version:
---  1. Replaced the single JASSM_Fired bool (which caused all
---     three missiles to read the SAME deployIdx because
---     JASSM_DeployCount hadn't advanced yet when the timers
---     were created) with JASSM_SalvoFired, an integer that
---     increments immediately when each slot is scheduled.
---  2. Each timer now captures a *local snapshot* of the
---     deployIdx it should use, rather than re-reading
---     JASSM_DeployCount at callback time (which would be
---     stale by then if another weapon window ran meanwhile).
---  3. Stock is re-checked inside each timer callback so a
---     salvo started with 2 missiles left doesn't over-draw.
+-- Flow:
+--   1. Guard: if JASSM_SalvoFired >= 1 the whole salvo has
+--      already been *scheduled* this weapon window — do nothing.
+--   2. Immediately set JASSM_SalvoFired = 1 to block all
+--      subsequent Think() ticks (66 Hz) from re-entering.
+--   3. Roll salvo size BEFORE firing missile 1 so we know
+--      how many indices to reserve.
+--   4. Snapshot ALL three deploy indices NOW, before ANY
+--      SpawnOneJASSM call, using arithmetic on JASSM_DeployCount.
+--      This is safe because DeployCount hasn't changed yet.
+--   5. Fire missile 1 immediately. Missiles 2/3 via timer.Simple
+--      so they arrive 1 s apart.
+--   6. Each timer re-validates the entity and checks stock
+--      before spawning.
 -- ============================================================
 function ENT:UpdateJASSM(ct)
-    -- JASSM_SalvoFired is reset to 0 in ArmWeapon every time
-    -- "jassm" is armed.  Once >= 1 we have already scheduled
-    -- the full salvo; nothing more to do this window.
-    if (self.JASSM_SalvoFired or 0) >= 1 then return end
+    -- Block re-entry.  JASSM_SalvoFired is 0 at arm time (set in
+    -- ArmWeapon and in Initialize) and only ever goes to 1 here.
+    if self.JASSM_SalvoFired >= 1 then return end
 
-    -- Abort if the bay ran dry between RollWeapon and now.
-    if (self.JASSM_Stock or 0) <= 0 then
-        self:Debug("JASSM: bay empty this window, skipping")
-        self.JASSM_SalvoFired = 1  -- prevent re-entry
+    -- Bay could have drained between RollWeapon and this tick.
+    if self.JASSM_Stock <= 0 then
+        self:Debug("JASSM: bay empty on UpdateJASSM entry, skipping window")
+        self.JASSM_SalvoFired = 1
         return
     end
 
-    -- Mark as scheduled immediately so re-entrant Think() ticks
-    -- (which arrive every server frame) do nothing more.
+    -- Lock immediately — no further ticks will enter past this point.
     self.JASSM_SalvoFired = 1
 
-    -- ---- Decide salvo size ----
-    -- 20% chance of a triple salvo, capped by available stock.
+    -- ---- Decide salvo size (20% triple, capped by available stock) ----
     local tripleRoll = math.random() < 0.20
-    local salvoCount = tripleRoll and math.min(3, self.JASSM_Stock) or 1
+    local salvoCount
+    if tripleRoll then
+        salvoCount = math.min(3, self.JASSM_Stock)
+    else
+        salvoCount = 1
+    end
 
-    self:Debug(string.format("JASSM salvo: %d missile(s) (triple=%s, stock=%d)",
-        salvoCount, tostring(tripleRoll), self.JASSM_Stock))
+    self:Debug(string.format(
+        "JASSM window: salvo=%d triple=%s stock=%d",
+        salvoCount, tostring(tripleRoll), self.JASSM_Stock
+    ))
 
-    -- ---- Missile 1 (immediate) ----
-    -- Snapshot the deployIdx BEFORE calling SpawnOneJASSM so the
-    -- index is correct even if JASSM_DeployCount advances.
-    local idx1 = self.JASSM_DeployCount + 1
+    -- ---- Snapshot deploy indices BEFORE any SpawnOneJASSM call ----
+    -- DeployCount is the number already fired over the plane's lifetime.
+    -- The next three missiles will be DeployCount+1, +2, +3.
+    -- We snapshot all of them now so the timer closures never have
+    -- to re-read a field that will have changed by callback time.
+    local baseCount = self.JASSM_DeployCount
+    local idx1      = baseCount + 1
+    local idx2      = baseCount + 2
+    local idx3      = baseCount + 3
+    local entIdx    = self:EntIndex()
+
+    -- ---- Missile 1 — immediate ----
     self:SpawnOneJASSM(idx1)
 
-    -- ---- Missile 2 (+1 s) ----
+    -- ---- Missile 2 — +1 s ----
     if salvoCount >= 2 then
-        local entIdx = self:EntIndex()
-        local idx2   = self.JASSM_DeployCount + 1  -- snapshot AFTER missile 1 consumed its slot
         timer.Simple(1.0, function()
             local plane = Entity(entIdx)
             if not IsValid(plane) or plane:IsMarkedForDeletion() then return end
-            if (plane.JASSM_Stock or 0) <= 0 then return end
+            if plane.JASSM_Stock <= 0 then return end
             plane:SpawnOneJASSM(idx2)
         end)
     end
 
-    -- ---- Missile 3 (+2 s) ----
+    -- ---- Missile 3 — +2 s ----
     if salvoCount >= 3 then
-        local entIdx = self:EntIndex()
-        local idx3   = self.JASSM_DeployCount + 2  -- +2 because missiles 1 & 2 will have consumed two slots
         timer.Simple(2.0, function()
             local plane = Entity(entIdx)
             if not IsValid(plane) or plane:IsMarkedForDeletion() then return end
-            if (plane.JASSM_Stock or 0) <= 0 then return end
+            if plane.JASSM_Stock <= 0 then return end
             plane:SpawnOneJASSM(idx3)
         end)
     end
