@@ -27,11 +27,9 @@ local GAU_BRRT_SOUNDS = {
 
 local SOUND_105_IMPACT = "killstreak_explosions/105_explosion.wav"
 
--- Peaceful mode timing (seconds)
 local PEACEFUL_MIN = 4
 local PEACEFUL_MAX = 7
 
--- Maximum total JASSMs the plane may deploy over its entire lifetime.
 local JASSM_MAX_STOCK = 6
 
 -- ============================================================
@@ -41,7 +39,8 @@ local JASSM_MAX_STOCK = 6
 util.AddNetworkString("bombin_plane_damage_tier")
 util.AddNetworkString("bombin_plane_spatial_sound")
 util.AddNetworkString("bombin_105mm_direct_sound")
-util.AddNetworkString("bombin_muzzle_flash")   -- GAU-only muzzle FX net string
+util.AddNetworkString("bombin_muzzle_flash")       -- GAU / 25mm rich FX
+util.AddNetworkString("bombin_muzzle_flash_40mm")  -- 40mm Bofors rich FX
 
 local SOUND_SPEED     = 8200
 local MAX_HEAR_DIST   = 88000
@@ -177,9 +176,6 @@ ENT.GUN40_Scatter        = 600
 ENT.GUN105_Scatter       = 400
 
 ENT.GAU_Spray_Delay      = 0.033
-
--- How long (seconds) bullets STOP firing between each burst in spray mode.
--- The firing window per burst = GAU_SpraySoundDelay - GAU_SprayPauseDuration.
 ENT.GAU_SprayPauseDuration = 0.6
 
 ENT.MuzzleForwardOffset  = 250
@@ -187,8 +183,6 @@ ENT.MuzzleSideOffset     = -60
 ENT.Plane_Ambient_SoundPath = "ac/bomber_engine_high.wav"
 
 ENT.JASSM_AltOffset = 500
-
--- Local-space offset to the model's tail bay (negative X = rearward in model space).
 ENT.JASSM_TailOffset = Vector(-420, 0, 0)
 
 ENT.MaxHP = 8000
@@ -522,7 +516,7 @@ function ENT:PlaySpraySoundAndFlash(ct)
         math.random(96, 104),
         1.0
     )
-    self:SpawnGAUMuzzleFX()   -- GAU-only rich FX
+    self:SpawnGAUMuzzleFX()
     local fireDuration = self.GAU_SpraySoundDelay - self.GAU_SprayPauseDuration
     self.GAU_SprayBurstEnd  = ct + fireDuration
     self.NextShotTimeSpray  = ct
@@ -570,10 +564,7 @@ function ENT:GetWeaponMuzzleWorldPos()
     return self:LocalToWorld(self.MuzzlePoints[self.MuzzleIndexWeapon])
 end
 
--- SpawnGAUMuzzleFX: rich client-side FX for the GAU/25mm only.
--- Broadcasts the muzzle world position via net so cl_bombin_muzzle_fx.lua
--- can render the smoke trail, sparks, cone flame and bloom.
--- ManhackSparks kept as server-side fallback for clients without the file.
+-- GAU / 25mm: rich client FX (smoke + sparks + cone flame)
 function ENT:SpawnGAUMuzzleFX()
     local worldPos = self:GetWeaponMuzzleWorldPos()
     local ang      = self:GetAngles()
@@ -582,7 +573,6 @@ function ENT:SpawnGAUMuzzleFX()
         net.WriteVector(worldPos)
     net.Broadcast()
 
-    -- Server-authoritative fallback sparks
     for _ = 1, 2 do
         local sp = EffectData()
         sp:SetOrigin(worldPos + Vector(math.Rand(-4,4), math.Rand(-4,4), 0))
@@ -591,8 +581,25 @@ function ENT:SpawnGAUMuzzleFX()
     end
 end
 
--- SpawnHeavyMuzzleFX: original cball_explode effect for 40mm and 105mm.
--- scale 2 = 40mm, scale 3 = 105mm.
+-- 40mm: rich client FX (bigger smoke + bigger flame + corona)
+function ENT:Spawn40mmMuzzleFX()
+    local worldPos = self:GetMuzzlePos()
+    local ang      = self:GetAngles()
+
+    net.Start("bombin_muzzle_flash_40mm")
+        net.WriteVector(worldPos)
+    net.Broadcast()
+
+    -- Server-side heavy sparks fallback
+    for _ = 1, 3 do
+        local sp = EffectData()
+        sp:SetOrigin(worldPos + Vector(math.Rand(-8,8), math.Rand(-8,8), math.Rand(-4,4)))
+        sp:SetNormal(ang:Up()) sp:SetScale(2) sp:SetMagnitude(2) sp:SetRadius(20)
+        util.Effect("ManhackSparks", sp, true, true)
+    end
+end
+
+-- 105mm: original cball_explode, no net broadcast (explosion effect is enough)
 function ENT:SpawnHeavyMuzzleFX(scale)
     local worldPos = self:GetMuzzlePos()
     local ang      = self:GetAngles()
@@ -647,7 +654,7 @@ function ENT:StartGAUBurst()
     self.GAU_SweepStartPos = targetPos - sweepDir * self.GAU_SweepHalfLength
     self.GAU_SweepEndPos   = targetPos + sweepDir * self.GAU_SweepHalfLength
     table.insert(self.GAU_ActiveBursts, { bulletsFired = 0, nextTime = CurTime() })
-    self:SpawnGAUMuzzleFX()   -- GAU-only rich FX
+    self:SpawnGAUMuzzleFX()
     self:EmitSpatialSound(
         table.Random(GAU_BRRT_SOUNDS),
         self.CenterPos,
@@ -733,7 +740,7 @@ function ENT:Update40mm(ct)
             if IsValid(phys) then phys:SetVelocity(dir * 1600) end
         end
     end
-    self:SpawnHeavyMuzzleFX(2)   -- 40mm: original cball_explode, scale 2
+    self:Spawn40mmMuzzleFX()   -- rich client FX for 40mm
     self:EmitSpatialSound(
         "killstreak_rewards/ac-130_40mm_fire.wav",
         self.CenterPos,
@@ -783,7 +790,7 @@ function ENT:Update105mm(ct)
             if IsValid(phys) then phys:SetVelocity(dir * 1800) end
         end
     end
-    self:SpawnHeavyMuzzleFX(3)   -- 105mm: original cball_explode, scale 3
+    self:SpawnHeavyMuzzleFX(3)   -- 105mm keeps original cball_explode scale 3
     self:EmitSpatialSound(
         "killstreak_rewards/ac-130_105mm_fire.wav",
         self.CenterPos,
