@@ -4,20 +4,25 @@
 -- Tier drives color + size: white vapor -> dense black smoke.
 -- Unique hook/function names to avoid collision with heli & an-71.
 -- ============================================================
+-- Source Engine local-space axes for an aircraft entity:
+--   X = forward  (nose -> tail is negative X)
+--   Y = right    (starboard is positive Y, port is negative Y)
+--   Z = up
+--
+-- Three emitters:
+--   [1] Left  wingtip : large -Y offset, slightly behind wing centre
+--   [2] Right wingtip : large +Y offset, slightly behind wing centre
+--   [3] Fuselage body : centre-line, trailing near the tail
+-- ============================================================
 
 local TRAIL_MATERIAL = Material( "trails/smoke" )
 
 local SAMPLE_RATE = 0.025  -- seconds between samples (40fps)
 
--- ============================================================
--- EMISSION POINTS  (model-local offsets for AC-130)
--- Two wingtip trails only — one per wing.
--- X axis is left/right on the model (positive = right, negative = left).
--- Push these values further out if they still appear too central.
--- ============================================================
 local TRAIL_POSITIONS = {
-    Vector( -280, 20, -6 ),   -- left wingtip
-    Vector(  280, 20, -6 ),   -- right wingtip
+    Vector( -30, -280, -6 ),   -- left  wingtip  (far -Y)
+    Vector( -30,  280, -6 ),   -- right wingtip  (far +Y)
+    Vector( -70,    0,  0 ),   -- fuselage body  (centre, trailing edge)
 }
 
 -- ============================================================
@@ -36,16 +41,6 @@ local TIER_CONFIG = {
 local AC130Trails = {}
 
 -- ============================================================
--- PUBLIC: called from net.Receive in cl_init.lua
--- Unique name — does not collide with heli or an-71.
--- ============================================================
-function PlaneTrailSystem_SetTier( entIndex, tier )
-    local state = AC130Trails[entIndex]
-    if not state then return end
-    state.tier = tier
-end
-
--- ============================================================
 -- INTERNALS
 -- ============================================================
 local function EnsureRegistered( entIndex )
@@ -59,6 +54,18 @@ local function EnsureRegistered( entIndex )
         nextSample = 0,
         trails     = trails,
     }
+end
+
+-- ============================================================
+-- PUBLIC: called from net.Receive in cl_init.lua
+-- EnsureRegistered called first so a tier message arriving before
+-- the entity is tracked does not silently drop the tier.
+-- ============================================================
+function PlaneTrailSystem_SetTier( entIndex, tier )
+    EnsureRegistered( entIndex )
+    local state = AC130Trails[entIndex]
+    if not state then return end
+    state.tier = tier
 end
 
 local function DrawBeam( positions, cfg )
