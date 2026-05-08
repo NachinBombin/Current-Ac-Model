@@ -11,6 +11,11 @@
 -- Ignition fires when pos.z reaches self.IgnitionAlt (checked every Think
 -- tick at FREEFALL_THINK_DT = 1/66 s so overshoot is at most ~5 u).
 -- After ignition the missile climbs 600 u to self.OrbitAlt and loiters there.
+--
+-- Diagonal freefall: the missile drifts horizontally (along CallDir) while
+-- falling, so the drop looks like a realistic weapon release instead of a
+-- pure vertical plummet.  FREEFALL_HORIZ_SPEED controls how fast it slides
+-- sideways during the fall.
 
 AddCSLuaFile("cl_init.lua")
 AddCSLuaFile("shared.lua")
@@ -31,15 +36,19 @@ local GRAVITY_MULT      = 1.5
 local SHARD_LIFE        = 8
 
 -- Freefall physics constants.
--- GRAVITY         : Source default (600 u/s²) applied manually each tick.
+-- GRAVITY          : Source default (600 u/s²) applied manually each tick.
 -- FREEFALL_MAX_FALL: terminal velocity downward (u/s).  Drag coefficient is
 --                   derived so that at this speed drag == gravity, giving
 --                   a true asymptotic terminal velocity.
 -- FREEFALL_THINK_DT: Think() interval during freefall (≈66 Hz).
-local FREEFALL_GRAVITY    = 600
-local FREEFALL_MAX_FALL   = 320
-local FREEFALL_DRAG_K     = FREEFALL_GRAVITY / FREEFALL_MAX_FALL  -- k = g / v_terminal
-local FREEFALL_THINK_DT   = 1 / 66
+-- FREEFALL_HORIZ_SPEED: constant horizontal drift speed during freefall (u/s).
+--                   The missile glides forward along CallDir as it falls,
+--                   giving the drop a diagonal, realistic trajectory.
+local FREEFALL_GRAVITY     = 600
+local FREEFALL_MAX_FALL    = 320
+local FREEFALL_DRAG_K      = FREEFALL_GRAVITY / FREEFALL_MAX_FALL  -- k = g / v_terminal
+local FREEFALL_THINK_DT    = 1 / 66
+local FREEFALL_HORIZ_SPEED = 380   -- u/s horizontal glide while falling
 
 local CHUTE_ABOVE    = 105   -- chute floats this many units above missile origin
 local ORBIT_ALT_RISE = 600   -- orbit band sits this many units above ignition altitude
@@ -92,7 +101,8 @@ function ENT:Initialize()
 	self.SpawnTime = CurTime()
 
 	local baseRadius = self.OrbitRadius or 2500
-	local baseSpeed  = self.Speed       or 250
+	-- Loiter speed increased to 420 u/s for a more menacing orbit cadence.
+	local baseSpeed  = self.Speed       or 420
 	self.OrbitRadius = baseRadius * math.Rand(0.82, 1.18)
 	self.Speed       = baseSpeed  * math.Rand(0.85, 1.15)
 
@@ -175,8 +185,13 @@ function ENT:Initialize()
 
 	self.PhysObj = nil
 
-	-- Freefall state: velocity is tracked in self.FreefallVelZ (u/s, negative = downward).
-	self.FreefallVelZ  = 0
+	-- Freefall state.
+	-- FreefallVelZ  : vertical component (u/s, negative = downward).
+	-- FreefallHorizDir: unit vector for horizontal glide (CallDir, XY only).
+	-- FreefallHorizSpeed: current horizontal speed (ramps up from 0 to FREEFALL_HORIZ_SPEED).
+	self.FreefallVelZ        = 0
+	self.FreefallHorizDir    = Vector(self.CallDir.x, self.CallDir.y, 0)
+	self.FreefallHorizSpeed  = 0   -- will ramp up each tick
 
 	self.EngineLoop    = nil
 	self.NextPassSound = CurTime() + math.Rand(5, 10)
@@ -255,9 +270,11 @@ function ENT:IgniteEngine()
 		local fwd = self:GetForward()
 		fwd.z = 0
 		fwd:Normalize()
-		-- Launch forward at cruise speed; the altitude error (OrbitAlt - pos.z)
-		-- in PhysicsUpdate will immediately generate upward vel.z to climb.
-		self.PhysObj:SetVelocity(fwd * self.Speed)
+		-- Seed vphysics velocity with the horizontal glide speed accumulated
+		-- during freefall so there is no jarring velocity reset at ignition.
+		local initVel = fwd * math.max(self.Speed, self.FreefallHorizSpeed)
+		initVel.z = 0
+		self.PhysObj:SetVelocity(initVel)
 	end
 
 	-- Ignition burst cloud
@@ -417,36 +434,44 @@ function ENT:Think()
 	if not self.EngineIgnited then
 		local dt = FREEFALL_THINK_DT
 
-		-- Step 1: apply gravity, then apply upward drag.
+		-- Vertical: apply gravity, then apply upward drag.
 		-- Net acceleration = -g + k*v  (v is negative when falling)
-		-- This gives true terminal velocity: at v = -g/k = -FREEFALL_MAX_FALL
-		-- drag exactly cancels gravity, acceleration goes to zero.
 		self.FreefallVelZ = self.FreefallVelZ - FREEFALL_GRAVITY * dt
-		local drag = FREEFALL_DRAG_K * (-self.FreefallVelZ)  -- drag magnitude (positive)
+		local drag = FREEFALL_DRAG_K * (-self.FreefallVelZ)
 		self.FreefallVelZ = self.FreefallVelZ + drag * dt
-
-		-- Hard clamp as a safety net (floating point drift).
 		if self.FreefallVelZ < -FREEFALL_MAX_FALL then
 			self.FreefallVelZ = -FREEFALL_MAX_FALL
 		end
 
-		-- Step 2: integrate position.
-		local pos = self:GetPos()
-		local newZ = pos.z + self.FreefallVelZ * dt
-		self:SetPos(Vector(pos.x, pos.y, newZ))
+		-- Horizontal: ramp up to FREEFALL_HORIZ_SPEED over ~1.5 seconds.
+		-- This gives a subtle glide-off-the-rail feel rather than an
+		-- instant sideways lurch.
+		self.FreefallHorizSpeed = math.min(
+			self.FreefallHorizSpeed + FREEFALL_HORIZ_SPEED * dt * 0.7,
+			FREEFALL_HORIZ_SPEED
+		)
 
-		-- Step 3: nose-down attitude during freefall (cosmetic).
+		-- Integrate position: both vertical and horizontal components.
+		local pos  = self:GetPos()
+		local newX = pos.x + self.FreefallHorizDir.x * self.FreefallHorizSpeed * dt
+		local newY = pos.y + self.FreefallHorizDir.y * self.FreefallHorizSpeed * dt
+		local newZ = pos.z + self.FreefallVelZ * dt
+		self:SetPos(Vector(newX, newY, newZ))
+
+		-- Cosmetic attitude: nose tilts down as it falls, yaw stays aligned
+		-- with the horizontal glide direction.
+		local glideYaw = self.FreefallHorizDir:Angle().y
+		local pitchFrac = math.Clamp(-self.FreefallVelZ / FREEFALL_MAX_FALL, 0, 1)
 		local ang = self:GetAngles()
 		self:SetAngles(Angle(
-			Lerp(0.12, ang.p, -15),
-			ang.y,
+			Lerp(0.12, ang.p, pitchFrac * -25),
+			Lerp(0.08, ang.y, glideYaw),
 			Lerp(0.12, ang.r, 0)
 		))
 
-		-- Step 4: check for ignition altitude.
-		-- Snap to IgnitionAlt so we never overshoot by more than one tick.
+		-- Check for ignition altitude.
 		if newZ <= self.IgnitionAlt then
-			self:SetPos(Vector(pos.x, pos.y, self.IgnitionAlt))
+			self:SetPos(Vector(newX, newY, self.IgnitionAlt))
 			self:IgniteEngine()
 			-- Fall through to post-ignition logic below.
 		else
