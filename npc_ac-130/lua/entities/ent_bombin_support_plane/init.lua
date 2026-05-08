@@ -32,15 +32,11 @@ local PEACEFUL_MAX = 7
 
 local JASSM_MAX_STOCK = 6
 
--- ============================================================
--- SPATIAL PER-PLAYER SOUND SYSTEM
--- ============================================================
-
 util.AddNetworkString("bombin_plane_damage_tier")
 util.AddNetworkString("bombin_plane_spatial_sound")
 util.AddNetworkString("bombin_105mm_direct_sound")
-util.AddNetworkString("bombin_muzzle_flash")       -- GAU / 25mm
-util.AddNetworkString("bombin_muzzle_flash_40mm")  -- 40mm Bofors
+util.AddNetworkString("bombin_muzzle_flash")
+util.AddNetworkString("bombin_muzzle_flash_40mm")
 
 local SOUND_SPEED     = 8200
 local MAX_HEAR_DIST   = 88000
@@ -109,9 +105,6 @@ local function FlushPendingSounds()
     pending_sounds = keep
 end
 
--- ============================================================
--- 105mm SHELL IMPACT TRACKING
--- ============================================================
 local Shells105 = {}
 
 hook.Add("EntityRemoved", "bombin_105mm_shell_sound", function(ent)
@@ -126,10 +119,6 @@ hook.Add("EntityRemoved", "bombin_105mm_shell_sound", function(ent)
         net.WriteUInt  ( math.random(96, 104), 8 )
     net.Broadcast()
 end)
-
--- ============================================================
--- ENT DEFINITION
--- ============================================================
 
 function ENT:Debug(msg)
     print("[Bombin Support Plane ENT] " .. msg)
@@ -393,10 +382,6 @@ function ENT:PhysicsUpdate(phys)
     phys:SetVelocity(vel)
 end
 
--- ============================================================
--- WEAPON CYCLE
--- ============================================================
-
 function ENT:HandleWeaponWindow(ct)
     if self.IsPeaceful then
         if ct >= self.PeacefulUntil then
@@ -536,18 +521,15 @@ function ENT:GetWeaponMuzzleWorldPos()
     return self:LocalToWorld(self.MuzzlePoints[self.MuzzleIndexWeapon])
 end
 
--- GAU: sends entindex + local-space muzzle + world fire pos
--- Client uses entindex to recompute world pos each frame for bloom/flame.
--- World fire pos is used for smoke (stays in world space, correct).
 function ENT:SpawnGAUMuzzleFX()
-    local worldPos = self:GetWeaponMuzzleWorldPos()
     local localPos = self.MuzzlePoints[self.MuzzleIndexWeapon] or Vector(0,0,0)
+    local worldPos = self:LocalToWorld(localPos)
     local ang      = self:GetAngles()
 
     net.Start("bombin_muzzle_flash")
         net.WriteUInt  (self:EntIndex(), 16)
         net.WriteVector(localPos)
-        net.WriteVector(worldPos)   -- fire-time world pos for smoke
+        net.WriteVector(worldPos)
     net.Broadcast()
 
     for _ = 1, 2 do
@@ -558,10 +540,8 @@ function ENT:SpawnGAUMuzzleFX()
     end
 end
 
--- 40mm: same pattern
 function ENT:Spawn40mmMuzzleFX()
     local worldPos = self:GetMuzzlePos()
-    -- For 40mm, GetMuzzlePos returns a world position, so compute local manually
     local localPos = self:WorldToLocal(worldPos)
     local ang      = self:GetAngles()
 
@@ -579,7 +559,6 @@ function ENT:Spawn40mmMuzzleFX()
     end
 end
 
--- 105mm: original cball_explode only, no net FX
 function ENT:SpawnHeavyMuzzleFX(scale)
     local worldPos = self:GetMuzzlePos()
     local ang      = self:GetAngles()
@@ -591,10 +570,6 @@ function ENT:SpawnHeavyMuzzleFX(scale)
     ed:SetRadius(20 * scale)
     util.Effect("cball_explode", ed, true, true)
 end
-
--- ============================================================
--- GAU FIRE
--- ============================================================
 
 function ENT:FireGAUBulletAt(muzzlePos, impactPos, bulletIndex)
     local dir = impactPos - muzzlePos
@@ -632,8 +607,9 @@ function ENT:StartGAUBurst()
     sweepDir:Normalize()
     self.GAU_SweepStartPos = targetPos - sweepDir * self.GAU_SweepHalfLength
     self.GAU_SweepEndPos   = targetPos + sweepDir * self.GAU_SweepHalfLength
-    table.insert(self.GAU_ActiveBursts, { bulletsFired = 0, nextTime = CurTime() })
+    -- First flash + sound at burst start
     self:SpawnGAUMuzzleFX()
+    table.insert(self.GAU_ActiveBursts, { bulletsFired = 0, nextTime = CurTime() })
     self:EmitSpatialSound(
         table.Random(GAU_BRRT_SOUNDS), self.CenterPos, WEAPON_LEVEL, math.random(96, 104), 1.0
     )
@@ -648,6 +624,8 @@ function ENT:UpdateActiveGAUBursts(ct)
         elseif ct >= burst.nextTime then
             burst.bulletsFired = burst.bulletsFired + 1
             burst.nextTime     = ct + self.GAU_BurstDelay
+            -- Flash on EVERY bullet
+            self:SpawnGAUMuzzleFX()
             self:FireSingleGAUBullet(burst.bulletsFired)
             if burst.bulletsFired >= self.GAU_BurstCount then
                 table.remove(self.GAU_ActiveBursts, idx)
@@ -677,6 +655,8 @@ function ENT:Update25mmSpray(ct)
     if ct < self.NextShotTimeSpray then return end
     self.NextShotTimeSpray = ct + self.GAU_Spray_Delay
     self.SprayBulletCount  = self.SprayBulletCount + 1
+    -- Flash on every spray bullet too
+    self:SpawnGAUMuzzleFX()
     local targetPos   = self:GetTargetGroundPos()
     local finalImpact = targetPos + Vector(
         math.Rand(-self.GAU_JitterAmount * 2, self.GAU_JitterAmount * 2),
@@ -762,10 +742,6 @@ function ENT:Update105mm(ct)
         "killstreak_rewards/ac-130_105mm_fire.wav", self.CenterPos, WEAPON_LEVEL, math.random(96,104), 1.0
     )
 end
-
--- ============================================================
--- JASSM
--- ============================================================
 
 function ENT:SpawnOneJASSM(deployIdx)
     if not scripted_ents.GetStored("ent_bombin_jassm_owned") then
