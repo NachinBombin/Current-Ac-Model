@@ -39,8 +39,8 @@ local JASSM_MAX_STOCK = 6
 util.AddNetworkString("bombin_plane_damage_tier")
 util.AddNetworkString("bombin_plane_spatial_sound")
 util.AddNetworkString("bombin_105mm_direct_sound")
-util.AddNetworkString("bombin_muzzle_flash")       -- GAU / 25mm rich FX
-util.AddNetworkString("bombin_muzzle_flash_40mm")  -- 40mm Bofors rich FX
+util.AddNetworkString("bombin_muzzle_flash")       -- GAU / 25mm
+util.AddNetworkString("bombin_muzzle_flash_40mm")  -- 40mm Bofors
 
 local SOUND_SPEED     = 8200
 local MAX_HEAR_DIST   = 88000
@@ -62,25 +62,19 @@ function ENT:EmitSpatialSound( soundPath, originPos, soundLevel, pitch, baseVol 
     local sendAt = CurTime()
     for _, ply in ipairs( player.GetAll() ) do
         if not IsValid(ply) then continue end
-
         local plyPos  = ply:GetPos()
         local toPlane = originPos - plyPos
         local dist    = toPlane:Length()
-
         if dist > MAX_HEAR_DIST then continue end
-
         local t   = dist / MAX_HEAR_DIST
         local vol = baseVol * ( 1 - t ) ^ VOL_FALLOFF_EXP
-
         local nearPos
         if dist > 0.1 then
             nearPos = plyPos + ( toPlane / dist ) * NEAR_OFFSET
         else
             nearPos = plyPos
         end
-
         local delay = dist / SOUND_SPEED
-
         pending_sounds[ #pending_sounds + 1 ] = {
             sendTime  = sendAt + delay,
             ply       = ply,
@@ -175,14 +169,14 @@ ENT.GUN105_TNT           = 2.5
 ENT.GUN40_Scatter        = 600
 ENT.GUN105_Scatter       = 400
 
-ENT.GAU_Spray_Delay      = 0.033
+ENT.GAU_Spray_Delay        = 0.033
 ENT.GAU_SprayPauseDuration = 0.6
 
 ENT.MuzzleForwardOffset  = 250
 ENT.MuzzleSideOffset     = -60
 ENT.Plane_Ambient_SoundPath = "ac/bomber_engine_high.wav"
 
-ENT.JASSM_AltOffset = 500
+ENT.JASSM_AltOffset  = 500
 ENT.JASSM_TailOffset = Vector(-420, 0, 0)
 
 ENT.MaxHP = 8000
@@ -350,7 +344,6 @@ function ENT:Think()
     if ct >= self.DieTime then self:Remove() return end
     if not IsValid(self.PhysObj) then self.PhysObj = self:GetPhysicsObject() end
     if IsValid(self.PhysObj) and self.PhysObj:IsAsleep() then self.PhysObj:Wake() end
-
     FlushPendingSounds()
     self:HandleWeaponWindow(ct)
     self:UpdateActiveGAUBursts(ct)
@@ -401,7 +394,7 @@ function ENT:PhysicsUpdate(phys)
 end
 
 -- ============================================================
--- WEAPON CYCLE WITH PEACEFUL MODE
+-- WEAPON CYCLE
 -- ============================================================
 
 function ENT:HandleWeaponWindow(ct)
@@ -413,17 +406,8 @@ function ENT:HandleWeaponWindow(ct)
         end
         return
     end
-
-    if not self.CurrentWeapon then
-        self:EnterPeaceful(ct)
-        return
-    end
-
-    if ct >= self.WeaponWindowEnd then
-        self:EnterPeaceful(ct)
-        return
-    end
-
+    if not self.CurrentWeapon then self:EnterPeaceful(ct) return end
+    if ct >= self.WeaponWindowEnd then self:EnterPeaceful(ct) return end
     if     self.CurrentWeapon == "25mm"       then self:Update25mmBurstsSchedule(ct)
     elseif self.CurrentWeapon == "40mm"       then self:Update40mm(ct)
     elseif self.CurrentWeapon == "105mm"      then self:Update105mm(ct)
@@ -458,18 +442,14 @@ end
 
 function ENT:ArmWeapon(weapon, ct)
     weapon = weapon or self:RollWeapon()
-    if weapon == "jassm" and (self.JASSM_Stock or 0) <= 0 then
-        weapon = self:RollWeapon()
-    end
+    if weapon == "jassm" and (self.JASSM_Stock or 0) <= 0 then weapon = self:RollWeapon() end
     self.CurrentWeapon   = weapon
     self.WeaponWindowEnd = ct + self.WeaponWindow
     self:Debug("Armed: " .. self.CurrentWeapon)
-
     if self.MuzzleIndexGlobal < 1 or self.MuzzleIndexGlobal > #self.MuzzlePoints then
         self.MuzzleIndexGlobal = 1
     end
     self.MuzzleIndexWeapon = self.MuzzleIndexGlobal
-
     if self.CurrentWeapon == "25mm" then
         self.GAU_BurstTimes   = { ct + self.GAU_FirstBurstTime, ct + self.GAU_SecondBurstTime }
         self.GAU_BurstsFired  = 0
@@ -494,15 +474,9 @@ function ENT:ArmWeapon(weapon, ct)
     end
 end
 
-function ENT:PickNewWeapon(ct)
-    self:EnterPeaceful(ct)
-end
+function ENT:PickNewWeapon(ct) self:EnterPeaceful(ct) end
 
--- ============================================================
--- SPRAY LOOP HELPERS
--- ============================================================
-
-function ENT:StartSprayLoop(soundPath) self.NextSpraySoundTime = CurTime() end
+function ENT:StartSprayLoop() self.NextSpraySoundTime = CurTime() end
 function ENT:StopSprayLoop()
     self.NextSpraySoundTime = 0
     self.GAU_SprayBurstEnd  = 0
@@ -510,14 +484,10 @@ end
 
 function ENT:PlaySpraySoundAndFlash(ct)
     self:EmitSpatialSound(
-        table.Random(GAU_BRRT_SOUNDS),
-        self.CenterPos,
-        WEAPON_LEVEL,
-        math.random(96, 104),
-        1.0
+        table.Random(GAU_BRRT_SOUNDS), self.CenterPos, WEAPON_LEVEL, math.random(96, 104), 1.0
     )
     self:SpawnGAUMuzzleFX()
-    local fireDuration = self.GAU_SpraySoundDelay - self.GAU_SprayPauseDuration
+    local fireDuration      = self.GAU_SpraySoundDelay - self.GAU_SprayPauseDuration
     self.GAU_SprayBurstEnd  = ct + fireDuration
     self.NextShotTimeSpray  = ct
     self.NextSpraySoundTime = ct + self.GAU_SpraySoundDelay
@@ -539,7 +509,7 @@ function ENT:GetTargetGroundPos()
     if IsValid(target) then
         basePos = target:GetPos()
     else
-        local tr = util.QuickTrace(Vector(self.CenterPos.x, self.CenterPos.y, self.sky), Vector(0, 0, -30000), self)
+        local tr = util.QuickTrace(Vector(self.CenterPos.x, self.CenterPos.y, self.sky), Vector(0,0,-30000), self)
         basePos = tr.HitPos
     end
     local offsetDist = math.Rand(self.GAU_TargetOffsetMin, self.GAU_TargetOffsetMax)
@@ -560,17 +530,24 @@ function ENT:GetMuzzlePos()
 end
 
 function ENT:GetWeaponMuzzleWorldPos()
-    if self.MuzzleIndexWeapon < 1 or self.MuzzleIndexWeapon > #self.MuzzlePoints then self.MuzzleIndexWeapon = 1 end
+    if self.MuzzleIndexWeapon < 1 or self.MuzzleIndexWeapon > #self.MuzzlePoints then
+        self.MuzzleIndexWeapon = 1
+    end
     return self:LocalToWorld(self.MuzzlePoints[self.MuzzleIndexWeapon])
 end
 
--- GAU / 25mm: rich client FX (smoke + sparks + cone flame)
+-- GAU: sends entindex + local-space muzzle + world fire pos
+-- Client uses entindex to recompute world pos each frame for bloom/flame.
+-- World fire pos is used for smoke (stays in world space, correct).
 function ENT:SpawnGAUMuzzleFX()
     local worldPos = self:GetWeaponMuzzleWorldPos()
+    local localPos = self.MuzzlePoints[self.MuzzleIndexWeapon] or Vector(0,0,0)
     local ang      = self:GetAngles()
 
     net.Start("bombin_muzzle_flash")
-        net.WriteVector(worldPos)
+        net.WriteUInt  (self:EntIndex(), 16)
+        net.WriteVector(localPos)
+        net.WriteVector(worldPos)   -- fire-time world pos for smoke
     net.Broadcast()
 
     for _ = 1, 2 do
@@ -581,16 +558,19 @@ function ENT:SpawnGAUMuzzleFX()
     end
 end
 
--- 40mm: rich client FX (bigger smoke + bigger flame + corona)
+-- 40mm: same pattern
 function ENT:Spawn40mmMuzzleFX()
     local worldPos = self:GetMuzzlePos()
+    -- For 40mm, GetMuzzlePos returns a world position, so compute local manually
+    local localPos = self:WorldToLocal(worldPos)
     local ang      = self:GetAngles()
 
     net.Start("bombin_muzzle_flash_40mm")
+        net.WriteUInt  (self:EntIndex(), 16)
+        net.WriteVector(localPos)
         net.WriteVector(worldPos)
     net.Broadcast()
 
-    -- Server-side heavy sparks fallback
     for _ = 1, 3 do
         local sp = EffectData()
         sp:SetOrigin(worldPos + Vector(math.Rand(-8,8), math.Rand(-8,8), math.Rand(-4,4)))
@@ -599,7 +579,7 @@ function ENT:Spawn40mmMuzzleFX()
     end
 end
 
--- 105mm: original cball_explode, no net broadcast (explosion effect is enough)
+-- 105mm: original cball_explode only, no net FX
 function ENT:SpawnHeavyMuzzleFX(scale)
     local worldPos = self:GetMuzzlePos()
     local ang      = self:GetAngles()
@@ -620,7 +600,6 @@ function ENT:FireGAUBulletAt(muzzlePos, impactPos, bulletIndex)
     local dir = impactPos - muzzlePos
     if dir:LengthSqr() < 1 then return end
     dir:Normalize()
-
     local bullet = ents.Create("ent_bombin_gau_bullet")
     if not IsValid(bullet) then return end
     bullet:SetPos(muzzlePos)
@@ -656,11 +635,7 @@ function ENT:StartGAUBurst()
     table.insert(self.GAU_ActiveBursts, { bulletsFired = 0, nextTime = CurTime() })
     self:SpawnGAUMuzzleFX()
     self:EmitSpatialSound(
-        table.Random(GAU_BRRT_SOUNDS),
-        self.CenterPos,
-        WEAPON_LEVEL,
-        math.random(96, 104),
-        1.0
+        table.Random(GAU_BRRT_SOUNDS), self.CenterPos, WEAPON_LEVEL, math.random(96, 104), 1.0
     )
 end
 
@@ -687,8 +662,7 @@ function ENT:FireSingleGAUBullet(bulletIndex)
     local baseImpact = LerpVector(fraction, self.GAU_SweepStartPos, self.GAU_SweepEndPos)
     local jitter     = Vector(
         math.Rand(-self.GAU_JitterAmount, self.GAU_JitterAmount),
-        math.Rand(-self.GAU_JitterAmount, self.GAU_JitterAmount),
-        0
+        math.Rand(-self.GAU_JitterAmount, self.GAU_JitterAmount), 0
     )
     local muzzlePos = self:GetWeaponMuzzleWorldPos()
     self:FireGAUBulletAt(muzzlePos, baseImpact + jitter, bulletIndex)
@@ -706,11 +680,9 @@ function ENT:Update25mmSpray(ct)
     local targetPos   = self:GetTargetGroundPos()
     local finalImpact = targetPos + Vector(
         math.Rand(-self.GAU_JitterAmount * 2, self.GAU_JitterAmount * 2),
-        math.Rand(-self.GAU_JitterAmount * 2, self.GAU_JitterAmount * 2),
-        0
+        math.Rand(-self.GAU_JitterAmount * 2, self.GAU_JitterAmount * 2), 0
     )
-    local muzzlePos = self:GetWeaponMuzzleWorldPos()
-    self:FireGAUBulletAt(muzzlePos, finalImpact, self.SprayBulletCount)
+    self:FireGAUBulletAt(self:GetWeaponMuzzleWorldPos(), finalImpact, self.SprayBulletCount)
 end
 
 function ENT:Update40mm(ct)
@@ -740,13 +712,9 @@ function ENT:Update40mm(ct)
             if IsValid(phys) then phys:SetVelocity(dir * 1600) end
         end
     end
-    self:Spawn40mmMuzzleFX()   -- rich client FX for 40mm
+    self:Spawn40mmMuzzleFX()
     self:EmitSpatialSound(
-        "killstreak_rewards/ac-130_40mm_fire.wav",
-        self.CenterPos,
-        WEAPON_LEVEL,
-        math.random(96, 104),
-        1.0
+        "killstreak_rewards/ac-130_40mm_fire.wav", self.CenterPos, WEAPON_LEVEL, math.random(96,104), 1.0
     )
 end
 
@@ -777,8 +745,7 @@ function ENT:Update105mm(ct)
             shell.Shocktime = 8 shell.ShockForce = 1200
             shell.DEFAULT_PHYSFORCE_PLYGROUND = 1500
             shell.DEFAULT_PHYSFORCE_PLYAIR    = 80
-            local shellIdx = shell:EntIndex()
-            Shells105[shellIdx] = { plane = self }
+            Shells105[shell:EntIndex()] = { plane = self }
             local phys = shell:GetPhysicsObject()
             if IsValid(phys) then phys:EnableGravity(true) phys:SetVelocity(dir * self.GUN105_ShellVelocity) end
         end
@@ -790,51 +757,33 @@ function ENT:Update105mm(ct)
             if IsValid(phys) then phys:SetVelocity(dir * 1800) end
         end
     end
-    self:SpawnHeavyMuzzleFX(3)   -- 105mm keeps original cball_explode scale 3
+    self:SpawnHeavyMuzzleFX(3)
     self:EmitSpatialSound(
-        "killstreak_rewards/ac-130_105mm_fire.wav",
-        self.CenterPos,
-        WEAPON_LEVEL,
-        math.random(96, 104),
-        1.0
+        "killstreak_rewards/ac-130_105mm_fire.wav", self.CenterPos, WEAPON_LEVEL, math.random(96,104), 1.0
     )
 end
 
 -- ============================================================
--- JASSM DEPLOYMENT
+-- JASSM
 -- ============================================================
 
 function ENT:SpawnOneJASSM(deployIdx)
     if not scripted_ents.GetStored("ent_bombin_jassm_owned") then
-        self:Debug("JASSM: ent_bombin_jassm_owned not registered, skipping")
-        return false
+        self:Debug("JASSM: ent_bombin_jassm_owned not registered, skipping") return false
     end
-
-    if (self.JASSM_Stock or 0) <= 0 then
-        self:Debug("JASSM: bay empty, cannot spawn")
-        return false
-    end
-
+    if (self.JASSM_Stock or 0) <= 0 then self:Debug("JASSM: bay empty") return false end
     local maxDeploys = math.floor(self.SkyHeightAdd / self.JASSM_AltOffset)
     local clampedIdx = math.min(deployIdx, maxDeploys)
     local jassmAlt   = self.sky - (clampedIdx * self.JASSM_AltOffset)
-
-    local tailWorld = self:LocalToWorld(self.JASSM_TailOffset)
-    local spawnPos  = Vector(tailWorld.x, tailWorld.y, jassmAlt)
-    if not util.IsInWorld(spawnPos) then
-        spawnPos = Vector(self.CenterPos.x, self.CenterPos.y, jassmAlt)
-    end
-
-    local callDir = self:GetForward()
-    callDir.z = 0
-    if callDir:LengthSqr() < 0.01 then callDir = Vector(1, 0, 0) end
+    local tailWorld  = self:LocalToWorld(self.JASSM_TailOffset)
+    local spawnPos   = Vector(tailWorld.x, tailWorld.y, jassmAlt)
+    if not util.IsInWorld(spawnPos) then spawnPos = Vector(self.CenterPos.x, self.CenterPos.y, jassmAlt) end
+    local callDir = self:GetForward() callDir.z = 0
+    if callDir:LengthSqr() < 0.01 then callDir = Vector(1,0,0) end
     callDir:Normalize()
-
     local jassm = ents.Create("ent_bombin_jassm_owned")
     if not IsValid(jassm) then self:Debug("JASSM: ents.Create failed") return false end
-
-    jassm:SetPos(spawnPos)
-    jassm:SetAngles(callDir:Angle())
+    jassm:SetPos(spawnPos) jassm:SetAngles(callDir:Angle())
     jassm.SpawnedFromPlane = true
     jassm.CenterPos    = self.CenterPos
     jassm.CallDir      = callDir
@@ -842,65 +791,36 @@ function ENT:SpawnOneJASSM(deployIdx)
     jassm.Speed        = 250
     jassm.OrbitRadius  = self.OrbitRadius * 0.75
     jassm.SkyHeightAdd = math.max(jassmAlt - (self.sky - self.SkyHeightAdd), 800)
-    jassm:Spawn()
-    jassm:Activate()
-
+    jassm:Spawn() jassm:Activate()
     self.JASSM_Stock       = self.JASSM_Stock - 1
     self.JASSM_DeployCount = self.JASSM_DeployCount + 1
     self:SetNWInt("JASSM_Spent", JASSM_MAX_STOCK - self.JASSM_Stock)
-
-    self:Debug(string.format("JASSM #%d deployed  alt=%.0f  stock=%d",
-        self.JASSM_DeployCount, jassmAlt, self.JASSM_Stock))
+    self:Debug(string.format("JASSM #%d deployed alt=%.0f stock=%d", self.JASSM_DeployCount, jassmAlt, self.JASSM_Stock))
     return true
 end
 
 function ENT:UpdateJASSM(ct)
     if self.JASSM_SalvoFired >= 1 then return end
-
-    if self.JASSM_Stock <= 0 then
-        self:Debug("JASSM: bay empty on UpdateJASSM entry, skipping window")
-        self.JASSM_SalvoFired = 1
-        return
-    end
-
+    if self.JASSM_Stock <= 0 then self.JASSM_SalvoFired = 1 return end
     self.JASSM_SalvoFired = 1
-
     local tripleRoll = math.random() < 0.20
-    local salvoCount
-    if tripleRoll then
-        salvoCount = math.min(3, self.JASSM_Stock)
-    else
-        salvoCount = 1
-    end
-
-    self:Debug(string.format(
-        "JASSM window: salvo=%d triple=%s stock=%d",
-        salvoCount, tostring(tripleRoll), self.JASSM_Stock
-    ))
-
+    local salvoCount = tripleRoll and math.min(3, self.JASSM_Stock) or 1
+    self:Debug(string.format("JASSM window: salvo=%d triple=%s stock=%d", salvoCount, tostring(tripleRoll), self.JASSM_Stock))
     local baseCount = self.JASSM_DeployCount
-    local idx1      = baseCount + 1
-    local idx2      = baseCount + 2
-    local idx3      = baseCount + 3
     local entIdx    = self:EntIndex()
-
-    self:SpawnOneJASSM(idx1)
-
+    self:SpawnOneJASSM(baseCount + 1)
     if salvoCount >= 2 then
         timer.Simple(1.0, function()
-            local plane = Entity(entIdx)
-            if not IsValid(plane) or plane:IsMarkedForDeletion() then return end
-            if plane.JASSM_Stock <= 0 then return end
-            plane:SpawnOneJASSM(idx2)
+            local p = Entity(entIdx)
+            if not IsValid(p) or p:IsMarkedForDeletion() or p.JASSM_Stock <= 0 then return end
+            p:SpawnOneJASSM(baseCount + 2)
         end)
     end
-
     if salvoCount >= 3 then
         timer.Simple(2.0, function()
-            local plane = Entity(entIdx)
-            if not IsValid(plane) or plane:IsMarkedForDeletion() then return end
-            if plane.JASSM_Stock <= 0 then return end
-            plane:SpawnOneJASSM(idx3)
+            local p = Entity(entIdx)
+            if not IsValid(p) or p:IsMarkedForDeletion() or p.JASSM_Stock <= 0 then return end
+            p:SpawnOneJASSM(baseCount + 3)
         end)
     end
 end
@@ -924,8 +844,6 @@ end
 function ENT:OnRemove()
     if self.IdleLoop         then self.IdleLoop:Stop()         self.IdleLoop         = nil end
     if self.PlaneAmbientLoop then self.PlaneAmbientLoop:Stop() self.PlaneAmbientLoop = nil end
-    if not self.IsDestroyed then
-        self:StopSprayLoop()
-    end
+    if not self.IsDestroyed then self:StopSprayLoop() end
     pending_sounds = {}
 end
