@@ -8,8 +8,9 @@
 -- proportional to downward speed to produce true parachute dampening.
 -- At FREEFALL_MAX_FALL the drag exactly cancels gravity = terminal velocity.
 --
--- Ignition fires when pos.z reaches self.sky (checked every Think tick at
--- FREEFALL_THINK_DT = 1/66 s so overshoot is at most ~5 u).
+-- Ignition fires when pos.z reaches self.IgnitionAlt (checked every Think
+-- tick at FREEFALL_THINK_DT = 1/66 s so overshoot is at most ~5 u).
+-- After ignition the missile climbs 600 u to self.OrbitAlt and loiters there.
 
 AddCSLuaFile("cl_init.lua")
 AddCSLuaFile("shared.lua")
@@ -40,7 +41,8 @@ local FREEFALL_MAX_FALL   = 320
 local FREEFALL_DRAG_K     = FREEFALL_GRAVITY / FREEFALL_MAX_FALL  -- k = g / v_terminal
 local FREEFALL_THINK_DT   = 1 / 66
 
-local CHUTE_ABOVE = 105   -- chute floats this many units above missile origin
+local CHUTE_ABOVE    = 105   -- chute floats this many units above missile origin
+local ORBIT_ALT_RISE = 600   -- orbit band sits this many units above ignition altitude
 
 ENT.WeaponWindow       = 8
 ENT.DIVE_Speed         = 2200
@@ -80,8 +82,11 @@ function ENT:Initialize()
 		return
 	end
 
-	local altVariance = self.SkyHeightAdd * 0.25
-	self.sky = ground + self.SkyHeightAdd + math.Rand(-altVariance, altVariance)
+	local altVariance    = self.SkyHeightAdd * 0.25
+	-- IgnitionAlt: altitude at which the chute decouples and engine fires.
+	-- OrbitAlt:    target loiter altitude, 600 u above ignition point.
+	self.IgnitionAlt = ground + self.SkyHeightAdd + math.Rand(-altVariance, altVariance)
+	self.OrbitAlt    = self.IgnitionAlt + ORBIT_ALT_RISE
 
 	self.DieTime   = CurTime() + self.Lifetime
 	self.SpawnTime = CurTime()
@@ -107,9 +112,9 @@ function ENT:Initialize()
 		local entryRad    = self.OrbitAngle
 		local entryOffset = Vector(math.cos(entryRad), math.sin(entryRad), 0)
 		local orbitXY     = self.CenterPos + entryOffset * (self.OrbitRadius * 1.05)
-		spawnPos = Vector(orbitXY.x, orbitXY.y, self.sky + 900)
+		spawnPos = Vector(orbitXY.x, orbitXY.y, self.IgnitionAlt + 900)
 		if not util.IsInWorld(spawnPos) then
-			spawnPos = Vector(self.CenterPos.x, self.CenterPos.y, self.sky + 900)
+			spawnPos = Vector(self.CenterPos.x, self.CenterPos.y, self.IgnitionAlt + 900)
 		end
 		self:Debug("Standalone: orbit-entry spawn " .. tostring(spawnPos))
 	end
@@ -154,8 +159,9 @@ function ENT:Initialize()
 	self.JitterRate1  = math.Rand(0.030, 0.060)
 	self.JitterRate2  = math.Rand(0.007, 0.015)
 
-	self.AltDriftCurrent  = self.sky
-	self.AltDriftTarget   = self.sky
+	-- AltDrift starts centred on OrbitAlt so the missile climbs there immediately.
+	self.AltDriftCurrent  = self.OrbitAlt
+	self.AltDriftTarget   = self.OrbitAlt
 	self.AltDriftNextPick = CurTime() + math.Rand(8, 20)
 	self.AltDriftRange    = 700
 	self.AltDriftLerp     = 0.003
@@ -218,7 +224,9 @@ function ENT:Initialize()
 		self.ChuteEnt = chute
 	end
 
-	self:Debug("Spawned at " .. tostring(spawnPos) .. ", ignition alt " .. math.Round(self.sky))
+	self:Debug("Spawned at " .. tostring(spawnPos) ..
+		", ignition alt " .. math.Round(self.IgnitionAlt) ..
+		", orbit alt "    .. math.Round(self.OrbitAlt))
 end
 
 -- ================================================================
@@ -234,7 +242,7 @@ function ENT:IgniteEngine()
 
 	local pos = self:GetPos()
 
-	-- Switch to VPHYSICS so PhysicsUpdate() can drive the orbit.
+	-- Switch to VPHYSICS so PhysicsUpdate() can drive the climb + orbit.
 	self:PhysicsInit(SOLID_VPHYSICS)
 	self:SetMoveType(MOVETYPE_VPHYSICS)
 	self:SetSolid(SOLID_VPHYSICS)
@@ -247,6 +255,8 @@ function ENT:IgniteEngine()
 		local fwd = self:GetForward()
 		fwd.z = 0
 		fwd:Normalize()
+		-- Launch forward at cruise speed; the altitude error (OrbitAlt - pos.z)
+		-- in PhysicsUpdate will immediately generate upward vel.z to climb.
 		self.PhysObj:SetVelocity(fwd * self.Speed)
 	end
 
@@ -269,7 +279,7 @@ function ENT:IgniteEngine()
 		self.EngineLoop:Play()
 	end
 
-	self:Debug("Engine ignited -- wings deployed -- orbit begins")
+	self:Debug("Engine ignited -- climbing to orbit alt " .. math.Round(self.OrbitAlt))
 end
 
 -- ================================================================
@@ -349,7 +359,7 @@ function ENT:SetDestroyedState()
 		self.EngineLoop:ChangePitch(55, 2.5)
 	end
 
-	local altAboveGround = self:GetPos().z - (self.sky - self.SkyHeightAdd)
+	local altAboveGround = self:GetPos().z - self.IgnitionAlt
 	local delay = math.Clamp(altAboveGround / 600, 3, 12)
 	self.ExplodeTimer = CurTime() + delay
 
@@ -434,10 +444,9 @@ function ENT:Think()
 		))
 
 		-- Step 4: check for ignition altitude.
-		-- Use newZ so we never overshoot by more than one tick's travel.
-		if newZ <= self.sky then
-			-- Snap to ignition altitude before switching movetype.
-			self:SetPos(Vector(pos.x, pos.y, self.sky))
+		-- Snap to IgnitionAlt so we never overshoot by more than one tick.
+		if newZ <= self.IgnitionAlt then
+			self:SetPos(Vector(pos.x, pos.y, self.IgnitionAlt))
 			self:IgniteEngine()
 			-- Fall through to post-ignition logic below.
 		else
@@ -479,7 +488,7 @@ end
 -- ================================================================
 
 function ENT:PhysicsUpdate(phys)
-	if not self.DieTime or not self.sky then return end
+	if not self.DieTime or not self.IgnitionAlt then return end
 	if CurTime() >= self.DieTime then self:Remove() return end
 	if not self.EngineIgnited then return end
 
@@ -509,7 +518,7 @@ function ENT:PhysicsUpdate(phys)
 		return
 	end
 
-	-- ---- Normal orbit (non-dive) ----
+	-- ---- Normal orbit / climb to OrbitAlt (non-dive) ----
 	if self.Diving then return end
 
 	local pos = self:GetPos()
@@ -541,7 +550,9 @@ function ENT:PhysicsUpdate(phys)
 	             + math.sin(self.JitterPhase2) * self.JitterAmp2
 
 	if CurTime() >= self.AltDriftNextPick then
-		self.AltDriftTarget   = self.sky + math.Rand(-self.AltDriftRange, self.AltDriftRange)
+		-- Drift is centred on OrbitAlt; never let it fall below IgnitionAlt.
+		self.AltDriftTarget   = self.OrbitAlt + math.Rand(-self.AltDriftRange, self.AltDriftRange)
+		self.AltDriftTarget   = math.max(self.AltDriftTarget, self.IgnitionAlt + 50)
 		self.AltDriftNextPick = CurTime() + math.Rand(10, 25)
 	end
 	self.AltDriftCurrent = Lerp(self.AltDriftLerp, self.AltDriftCurrent, self.AltDriftTarget)
@@ -553,6 +564,8 @@ function ENT:PhysicsUpdate(phys)
 		vel = vel + posErr:GetNormalized() * 80
 	end
 
+	-- Proportional altitude controller: works for both the initial 600u climb
+	-- and steady-state altitude hold once OrbitAlt is reached.
 	local altError = liveAlt - pos.z
 	vel.z = math.Clamp(altError * 8, -120, 120)
 
