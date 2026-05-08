@@ -32,29 +32,99 @@ if #bombin_gau_store.buffer == 0 then
     end
 end
 
--- ─── Passby logic ─────────────────────────────────────────────────────────────
--- GAUEmitSound and gau_passby_* aliases are in cl_gau_passby_sounds.lua.
--- Zero dependency on the RBO addon.
---
--- Crossing detection (corrected):
---   sign(old_pos) = dot( dir, normalize(listener - old_pos) )
---     > 0  →  listener is AHEAD  of bullet's old position  (bullet hasn't passed yet)
---     ≤ 0  →  listener is BEHIND of bullet's old position  (bullet already past)
---
---   We want a crossing event: old_pos had listener ahead (sign > 0),
---   and new pos has listener behind (sign ≤ 0).  That means the bullet
---   swept past the listener's lateral plane THIS tick.
+-- ─── Visual ricochet store ─────────────────────────────────────────────────────
+local RICO_CHANCE    = 0.009
+local RICO_SPEED_MIN = 8000
+local RICO_SPEED_MAX = 18000
+local RICO_DUR_MIN   = 0.30
+local RICO_DUR_MAX   = 0.70
+local RICO_BUF_SIZE  = 32
 
+local bombin_gau_rico_store = {
+    last_idx       = 0,
+    active_visuals = {},
+    buffer         = {},
+}
+do
+    for i = 1, RICO_BUF_SIZE do
+        bombin_gau_rico_store.buffer[i] = {
+            pos      = Vector(0,0,0),
+            old_pos  = Vector(0,0,0),
+            vel      = Vector(0,0,0),
+            old_vel  = Vector(0,0,0),
+            die_time = 0,
+            dead     = true,
+        }
+    end
+end
+
+-- Pre-cached math upvalues.
+local m_random = math.random
+local m_rand   = math.Rand
+local m_sqrt   = math.sqrt
+local m_clamp  = math.Clamp
+local m_abs    = math.abs
+local m_pi     = math.pi
+local m_cos    = math.cos
+local m_sin    = math.sin
+
+local function bombin_spawn_visual_rico(hitPos, hitNormal)
+    local store    = bombin_gau_rico_store
+    local slot_idx = bit.band(store.last_idx, RICO_BUF_SIZE - 1) + 1
+    local slot     = store.buffer[slot_idx]
+
+    local helper
+    if m_abs(hitNormal.z) < 0.9 then
+        helper = Vector(0, 0, 1)
+    else
+        helper = Vector(1, 0, 0)
+    end
+    local tangent   = hitNormal:Cross(helper)  tangent:Normalize()
+    local bitangent = hitNormal:Cross(tangent) bitangent:Normalize()
+
+    local cos_theta = m_random()
+    local sin_theta = m_sqrt(1 - cos_theta * cos_theta)
+    local phi       = m_random() * (2 * m_pi)
+    local cp        = m_cos(phi)
+    local sp        = m_sin(phi)
+
+    local dx = hitNormal.x * cos_theta + tangent.x * (sin_theta * cp) + bitangent.x * (sin_theta * sp)
+    local dy = hitNormal.y * cos_theta + tangent.y * (sin_theta * cp) + bitangent.y * (sin_theta * sp)
+    local dz = hitNormal.z * cos_theta + tangent.z * (sin_theta * cp) + bitangent.z * (sin_theta * sp)
+    local len = m_sqrt(dx*dx + dy*dy + dz*dz)
+    if len < 0.001 then return end
+    dx = dx / len  dy = dy / len  dz = dz / len
+
+    local spd = m_rand(RICO_SPEED_MIN, RICO_SPEED_MAX)
+
+    slot.dead      = false
+    slot.die_time  = CurTime() + m_rand(RICO_DUR_MIN, RICO_DUR_MAX)
+    slot.pos.x     = hitPos.x    slot.pos.y     = hitPos.y    slot.pos.z     = hitPos.z
+    slot.old_pos.x = hitPos.x    slot.old_pos.y = hitPos.y    slot.old_pos.z = hitPos.z
+    slot.vel.x     = dx * spd    slot.vel.y     = dy * spd    slot.vel.z     = dz * spd
+    slot.old_vel.x = slot.vel.x  slot.old_vel.y = slot.vel.y  slot.old_vel.z = slot.vel.z
+
+    store.last_idx = store.last_idx + 1
+    store.active_visuals[#store.active_visuals + 1] = slot
+end
+
+-- ─── Net: ricochet signal from server ──────────────────────────────────────────────
+net.Receive("bombin_gau_rico", function()
+    local hitPos    = net.ReadVector()
+    local hitNormal = net.ReadVector()
+    bombin_spawn_visual_rico(hitPos, hitNormal)
+end)
+
+-- ─── Passby logic ─────────────────────────────────────────────────────────────
 local GAU_PASSBY_COOLDOWN     = 0.22
 local GAU_MAX_CONSIDER_DISTSQ = 4000 * 4000
-
-local gau_passby_last_time = -99
+local gau_passby_last_time    = -99
 
 local function gau_passby_emit(distance, position)
     if distance < 256 then
         GAUEmitSound("gau_passby_50_close", position)
     elseif distance < 768 then
-        if math.random(2) == 1 then
+        if m_random(2) == 1 then
             GAUEmitSound("gau_passby_50_medium_2", position)
         else
             GAUEmitSound("gau_passby_50_medium", position)
@@ -66,8 +136,6 @@ local function gau_passby_emit(distance, position)
     end
 end
 
--- Returns dot( dir, normalize(listener - bullet_pos) ).
--- Positive = listener is ahead of the bullet. Negative = bullet has passed.
 local function lateral_sign(bullet_pos, listener_pos, dir)
     local d = listener_pos - bullet_pos
     d:Normalize()
@@ -75,19 +143,12 @@ local function lateral_sign(bullet_pos, listener_pos, dir)
 end
 
 local function gau_check_passby(proj)
-    -- Skip first tick: old_pos == pos means no real segment yet.
     if proj.distance_traveled == 0 then return end
-
     local listener = LocalPlayer()
     if not IsValid(listener) then return end
-
-    -- Suppress while riding the plane (view entity is not a player).
     local view_ent = GetViewEntity()
     if IsValid(view_ent) and not view_ent:IsPlayer() then return end
-
     local listen_pos = listener:EyePos()
-
-    -- Broad-phase: cheap squared-distance cull on the segment midpoint.
     local mid_x = (proj.old_pos.x + proj.pos.x) * 0.5
     local mid_y = (proj.old_pos.y + proj.pos.y) * 0.5
     local mid_z = (proj.old_pos.z + proj.pos.z) * 0.5
@@ -95,42 +156,19 @@ local function gau_check_passby(proj)
     local dy = listen_pos.y - mid_y
     local dz = listen_pos.z - mid_z
     if (dx*dx + dy*dy + dz*dz) > GAU_MAX_CONSIDER_DISTSQ then return end
-
-    local vn = proj.dir  -- already a unit vector; dir never changes per-projectile
-
-    -- Crossing condition:
-    --   last tick: listener was AHEAD  (sign_old > 0)
-    --   this tick: listener is BEHIND  (sign_new ≤ 0)
-    local sign_old = lateral_sign(proj.old_pos, listen_pos, vn)
-    local sign_new = lateral_sign(proj.pos,     listen_pos, vn)
-
-    if sign_old <= 0 then
-        -- Listener was already behind old_pos — bullet spawned past us or we moved.
-        -- Mark as done so we stop checking every tick.
-        proj.gau_wizz = true
-        return
-    end
-
-    if sign_new > 0 then
-        -- Listener still ahead this tick — crossing hasn't happened yet.
-        return
-    end
-
-    -- ── Crossing confirmed this tick ──────────────────────────────────────────
-    proj.gau_wizz = true  -- only ever whizz once per bullet slot
-
-    -- Global cooldown: hard cap on concurrent passby spam from burst fire.
+    local sign_old = lateral_sign(proj.old_pos, listen_pos, proj.dir)
+    local sign_new = lateral_sign(proj.pos,     listen_pos, proj.dir)
+    if sign_old <= 0 then proj.gau_wizz = true return end
+    if sign_new > 0  then return end
+    proj.gau_wizz = true
     local now = UnPredictedCurTime()
     if (now - gau_passby_last_time) < GAU_PASSBY_COOLDOWN then return end
     gau_passby_last_time = now
-
-    -- Closest-approach distance + world position along the old→new segment.
     local dist, closest_pos = util.DistanceToLine(proj.old_pos, proj.pos, listen_pos)
     gau_passby_emit(dist, closest_pos)
 end
 
--- ─── Net receive ──────────────────────────────────────────────────────────────
-
+-- ─── Net receive: new projectile ─────────────────────────────────────────────────
 net.Receive("bombin_gau_projectile", function()
     local pos = net.ReadVector()
     local dir = net.ReadVector()
@@ -156,12 +194,12 @@ net.Receive("bombin_gau_projectile", function()
     store.active_projectiles[#store.active_projectiles + 1] = proj
 end)
 
--- ─── Movement + passby tick ───────────────────────────────────────────────────
-
+-- ─── Movement + passby tick ────────────────────────────────────────────────────
 local tick_interval = engine.TickInterval()
 local last_tick     = engine.TickCount()
 
 local function move_cl()
+    -- ─ real bullets ─
     local active = bombin_gau_store.active_projectiles
     local count  = #active
     local idx    = 1
@@ -179,14 +217,32 @@ local function move_cl()
             proj.vel      = step
             proj.pos      = new_pos
             proj.distance_traveled = proj.distance_traveled + step:Length()
-
-            -- Passby check runs after pos/old_pos are updated for this tick.
-            -- gau_wizz short-circuits after first confirmed crossing.
             if not proj.gau_wizz then
                 gau_check_passby(proj)
             end
-
             idx = idx + 1
+        end
+    end
+
+    -- ─ visual ricochets ─
+    local visuals = bombin_gau_rico_store.active_visuals
+    local vc      = #visuals
+    local vi      = 1
+    local now     = CurTime()
+    while vi <= vc do
+        local r = visuals[vi]
+        if r.dead or now >= r.die_time then
+            r.dead      = true
+            visuals[vi] = visuals[vc]
+            visuals[vc] = nil
+            vc = vc - 1
+        else
+            r.old_pos.x = r.pos.x  r.old_pos.y = r.pos.y  r.old_pos.z = r.pos.z
+            r.old_vel.x = r.vel.x  r.old_vel.y = r.vel.y  r.old_vel.z = r.vel.z
+            r.pos.x = r.pos.x + r.vel.x * tick_interval
+            r.pos.y = r.pos.y + r.vel.y * tick_interval
+            r.pos.z = r.pos.z + r.vel.z * tick_interval
+            vi = vi + 1
         end
     end
 end
@@ -199,60 +255,100 @@ hook.Add("CreateMove", "bombin_gau_move_cl", function()
     end
 end)
 
--- ─── Renderer ─────────────────────────────────────────────────────────────────
-
+-- ─── Renderer ─────────────────────────────────────────────────────────────────────
 local function render_projectiles()
-    local active = bombin_gau_store.active_projectiles
-    local count  = #active
-    if count == 0 then return end
-
     local cam_pos      = EyePos()
     local real_time    = UnPredictedCurTime()
     local cur_ticktime = engine.TickCount() * tick_interval
-    local interp_frac  = math.Clamp((real_time - cur_ticktime) / tick_interval, 0, 2)
+    local interp_frac  = m_clamp((real_time - cur_ticktime) / tick_interval, 0, 2)
     local min_trail    = 120
 
-    for i = 1, count do
-        local p = active[i]
-        if p.hit then continue end
+    -- ─ real bullets (colors untouched) ─
+    local active = bombin_gau_store.active_projectiles
+    local count  = #active
+    if count > 0 then
+        for i = 1, count do
+            local p = active[i]
+            if p.hit then continue end
 
-        local render_pos = p.pos
-        if interp_frac <= 1.0 then
-            local t  = interp_frac
-            local t2 = t * t
-            local t3 = t2 * t
-            local h1 =  2*t3 - 3*t2 + 1
-            local h2 = -2*t3 + 3*t2
-            local h3 =  t3 - 2*t2 + t
-            local h4 =  t3 - t2
-            render_pos = p.old_pos * h1 + p.pos * h2
-                       + (p.old_vel or p.vel) * (h3 * tick_interval)
-                       + p.vel               * (h4 * tick_interval)
-        end
+            local render_pos = p.pos
+            if interp_frac <= 1.0 then
+                local t  = interp_frac
+                local t2 = t * t
+                local t3 = t2 * t
+                local h1 =  2*t3 - 3*t2 + 1
+                local h2 = -2*t3 + 3*t2
+                local h3 =  t3 - 2*t2 + t
+                local h4 =  t3 - t2
+                render_pos = p.old_pos * h1 + p.pos * h2
+                           + (p.old_vel or p.vel) * (h3 * tick_interval)
+                           + p.vel               * (h4 * tick_interval)
+            end
 
-        local tail_end = p.old_pos or render_pos
-        if p.vel then
-            local vls = p.vel:LengthSqr()
-            if vls > 1 then
-                local trail_vec = render_pos - tail_end
-                if trail_vec:LengthSqr() < min_trail * min_trail then
-                    tail_end = render_pos - p.vel * (1.0 / math.sqrt(vls)) * min_trail
+            local tail_end = p.old_pos or render_pos
+            if p.vel then
+                local vls = p.vel:LengthSqr()
+                if vls > 1 then
+                    local trail_vec = render_pos - tail_end
+                    if trail_vec:LengthSqr() < min_trail * min_trail then
+                        tail_end = render_pos - p.vel * (1.0 / m_sqrt(vls)) * min_trail
+                    end
                 end
             end
+
+            local dist  = m_sqrt(cam_pos:DistToSqr(render_pos))
+            local scale = m_clamp(dist / 1200, 1.5, 6)
+
+            render.SetMaterial(mat_beam)
+            if render_pos:DistToSqr(tail_end) > 4 then
+                render.DrawBeam(tail_end, render_pos, 8 * scale, 0, 1, Color(255, 240, 180, 255))
+            end
+            render.DrawBeam(tail_end, render_pos, 22 * scale, 0, 1, Color(255, 120, 0, 120))
+
+            render.SetMaterial(mat_glow)
+            render.DrawSprite(render_pos, 80 * scale, 80 * scale, Color(255, 160, 20, 200))
+            render.DrawSprite(render_pos, 20 * scale, 20 * scale, Color(255, 255, 200, 255))
         end
+    end
 
-        local dist  = math.sqrt(cam_pos:DistToSqr(render_pos))
-        local scale = math.Clamp(dist / 1200, 1.5, 6)
+    -- ─ visual ricochets ─
+    -- Same brightness/scale logic as AC47. Colors inherit the GAU yellow-white family
+    -- so ricochets read as hotter sparks of the same round, not foreign tracers.
+    local visuals = bombin_gau_rico_store.active_visuals
+    local vc      = #visuals
+    if vc > 0 then
+        local now = CurTime()
+        for i = 1, vc do
+            local r = visuals[i]
+            if r.dead or now >= r.die_time then continue end
 
-        render.SetMaterial(mat_beam)
-        if render_pos:DistToSqr(tail_end) > 4 then
-            render.DrawBeam(tail_end, render_pos, 8 * scale, 0, 1, Color(255, 240, 180, 255))
+            local rx = r.old_pos.x + (r.pos.x - r.old_pos.x) * interp_frac
+            local ry = r.old_pos.y + (r.pos.y - r.old_pos.y) * interp_frac
+            local rz = r.old_pos.z + (r.pos.z - r.old_pos.z) * interp_frac
+            local render_pos = Vector(rx, ry, rz)
+            local tail_end   = r.old_pos
+
+            local life_frac = m_clamp((r.die_time - now) / RICO_DUR_MAX, 0, 1)
+
+            local alpha_core = life_frac * 255
+            local alpha_halo = life_frac * 160
+            local alpha_glow = life_frac * 220
+            local alpha_tip  = life_frac * 255
+
+            local dist  = m_sqrt(cam_pos:DistToSqr(render_pos))
+            local scale = m_clamp(dist / 1200, 1.2, 4.5)
+
+            render.SetMaterial(mat_beam)
+            if render_pos:DistToSqr(tail_end) > 4 then
+                -- Core: GAU yellow-white family, brighter/wider than base tracer
+                render.DrawBeam(tail_end, render_pos, 10 * scale, 0, 1, Color(255, 255, 180, alpha_core))
+            end
+            render.DrawBeam(tail_end, render_pos, 28 * scale, 0, 1, Color(255, 140, 0, alpha_halo))
+
+            render.SetMaterial(mat_glow)
+            render.DrawSprite(render_pos, 100 * scale, 100 * scale, Color(255, 180, 30, alpha_glow))
+            render.DrawSprite(render_pos, 26 * scale,  26 * scale,  Color(255, 255, 220, alpha_tip))
         end
-        render.DrawBeam(tail_end, render_pos, 22 * scale, 0, 1, Color(255, 120, 0, 120))
-
-        render.SetMaterial(mat_glow)
-        render.DrawSprite(render_pos, 80 * scale, 80 * scale, Color(255, 160, 20, 200))
-        render.DrawSprite(render_pos, 20 * scale, 20 * scale, Color(255, 255, 200, 255))
     end
 end
 

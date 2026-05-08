@@ -12,6 +12,10 @@ local MAX_DIST      = 50000
 local MIN_SPEED     = 200
 local FORCE_MUL     = 5.0
 
+-- Same probability as the AC47 ricochet roll.
+local GIB_RICO_CHANCE = 0.009
+local GIB_MODEL       = "models/gibs/wood_gib01e.mdl"
+
 local IMPACT_SOUNDS = {
     "physics/concrete/impact_bullet1.wav",
     "physics/concrete/impact_bullet2.wav",
@@ -33,6 +37,7 @@ local GAU_BRRT_SOUNDS = {
 
 for _, s in ipairs(GAU_BRRT_SOUNDS) do util.PrecacheSound(s) end
 util.PrecacheModel(BULLET_MODEL)
+util.PrecacheModel(GIB_MODEL)
 
 bombin_gau_store = bombin_gau_store or {
     last_idx           = 0,
@@ -69,13 +74,67 @@ local BREAKABLE = {
     ["prop_physics_multiplayer"] = true,
 }
 
--- Returns the best valid attacker entity, falling back to the world entity.
--- Prevents NULL crashes in BlastDamage / TakeDamageInfo when the plane
--- has been removed before in-flight bullets reach their target.
 local function resolve_attacker(proj)
     if IsValid(proj.firer_ent) then return proj.firer_ent end
     if IsValid(proj.shooter)   then return proj.shooter   end
     return game.GetWorld()
+end
+
+-- ─── Ignited gib spawner ────────────────────────────────────────────────────────────
+-- Identical logic to the AC47 version. Server-only because Ignite() and
+-- prop_physics creation are server-side operations.
+local function SpawnIgnitedGib(hitPos, hitNormal)
+    local gib = ents.Create("prop_physics")
+    if not IsValid(gib) then return end
+
+    gib:SetModel(GIB_MODEL)
+    gib:SetPos(hitPos + hitNormal * 3)
+    gib:SetAngles(Angle(
+        math.random(0, 360),
+        math.random(0, 360),
+        math.random(0, 360)
+    ))
+    gib:Spawn()
+    gib:Activate()
+
+    local phys = gib:GetPhysicsObject()
+    if IsValid(phys) then
+        phys:Wake()
+
+        local helper
+        if math.abs(hitNormal.z) < 0.9 then
+            helper = Vector(0, 0, 1)
+        else
+            helper = Vector(1, 0, 0)
+        end
+        local tangent   = hitNormal:Cross(helper)  tangent:Normalize()
+        local bitangent = hitNormal:Cross(tangent) bitangent:Normalize()
+
+        local cos_theta = math.random()
+        local sin_theta = math.sqrt(1 - cos_theta * cos_theta)
+        local phi       = math.random() * (2 * math.pi)
+        local cp        = math.cos(phi)
+        local sp        = math.sin(phi)
+
+        local nx, ny, nz = hitNormal.x, hitNormal.y, hitNormal.z
+        local dx = nx * cos_theta + tangent.x * (sin_theta * cp) + bitangent.x * (sin_theta * sp)
+        local dy = ny * cos_theta + tangent.y * (sin_theta * cp) + bitangent.y * (sin_theta * sp)
+        local dz = nz * cos_theta + tangent.z * (sin_theta * cp) + bitangent.z * (sin_theta * sp)
+        local dlen = math.sqrt(dx*dx + dy*dy + dz*dz)
+        if dlen < 0.001 then gib:Remove() return end
+        dx = dx / dlen  dy = dy / dlen  dz = dz / dlen
+
+        local speed = math.Rand(120, 340)
+        phys:SetVelocity(Vector(dx * speed, dy * speed, dz * speed))
+        phys:SetAngleVelocity(Vector(
+            math.Rand(-400, 400),
+            math.Rand(-400, 400),
+            math.Rand(-400, 400)
+        ))
+    end
+
+    -- lifetime 0 = permanent fire, radius 0 = entity only (no area spread)
+    gib:Ignite(0, 0)
 end
 
 local function apply_damage(proj, tr, shooter)
@@ -144,6 +203,15 @@ local function apply_impact_fx(proj, tr)
             end
         end
     end
+
+    -- 0.9% roll: spawn ignited gib (server-only) + signal client for visual tracer.
+    if SERVER and math.random() < GIB_RICO_CHANCE then
+        SpawnIgnitedGib(hitPos, tr.HitNormal)
+        net.Start("bombin_gau_rico")
+            net.WriteVector(hitPos)
+            net.WriteVector(tr.HitNormal)
+        net.Broadcast()
+    end
 end
 
 local tick_interval = engine.TickInterval()
@@ -160,7 +228,7 @@ local function move_projectile(proj)
     local tr = util.TraceLine({
         start  = proj.pos,
         endpos = new_pos,
-        filter = IsValid(shooter) and { shooter } or nil,
+        filter = IsValid(shooter) and { proj.shooter } or nil,
         mask   = MASK_SHOT,
     })
 
@@ -200,6 +268,7 @@ end)
 
 if SERVER then
     util.AddNetworkString("bombin_gau_projectile")
+    util.AddNetworkString("bombin_gau_rico")
 
     function bombin_gau_spawn(shooter, firer_ent, pos, dir, bullet_index, hei_interval, blast_radius, blast_damage)
         local store    = bombin_gau_store
@@ -241,9 +310,6 @@ function ENT:Initialize()
 
     local pos = self:GetPos()
     local fwd = self:GetAngles():Forward()
-
-    -- AC-130 GAU uses a burst loop sound played once per burst on the plane, not per bullet.
-    -- No per-bullet sound here on purpose.
 
     bombin_gau_spawn(
         IsValid(self.Firer) and self.Firer or self,
