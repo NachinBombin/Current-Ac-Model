@@ -1,0 +1,143 @@
+{
+  "system": "AGM-158 JASSM Owned \u2014 Parachute & Ignition System",
+  "entity_files": {
+    "missile": "ent_bombin_jassm_owned  (init.lua / cl_init.lua / shared.lua)",
+    "parachute": "ent_bombin_jassm_chute_owned  (init.lua / cl_init.lua / shared.lua)"
+  },
+  "overview": "The missile is dropped from the AC-130 in a cold, engine-off state. A separate parachute entity attaches above it and slows the descent. When the missile reaches a pre-calculated ignition altitude the parachute decouples, the engine fires, wings extend, and the missile climbs 600 units to its orbit altitude where it loiters and eventually dive-attacks.",
+
+  "phase_1_spawn": {
+    "label": "Spawn / Drop",
+    "trigger": "ent_bombin_support_plane:UpdateJASSM() \u2014 or standalone (no admin spawner).",
+    "movetype": "MOVETYPE_NONE \u2014 the engine does NOT apply gravity; velocity is 100% manual.",
+    "solid": "SOLID_NONE, COLLISION_GROUP_INTERACTIVE_DEBRIS.",
+    "engine_state": "OFF. NWBool 'EngineOn' = false. No flame, no sound.",
+    "wings": "Bodygroup 1 = 0 (folded).",
+    "spawn_position": {
+      "from_plane": "Uses the plane's tail position at drop moment.",
+      "standalone": "Calculated from OrbitAngle offset * OrbitRadius * 1.05 from CenterPos XY, Z = IgnitionAlt + 900 units."
+    },
+    "altitude_calculation": {
+      "ground": "FindGround() raycasts straight down from CenterPos to find world floor Z.",
+      "IgnitionAlt": "ground + SkyHeightAdd (default 2500) + random variance of \u00b125% of SkyHeightAdd.",
+      "OrbitAlt": "IgnitionAlt + 600 (ORBIT_ALT_RISE constant).",
+      "note": "The missile always spawns ABOVE IgnitionAlt (at IgnitionAlt + 900) so it has room to freefall before ignition triggers."
+    },
+    "parachute_spawn": {
+      "entity": "ent_bombin_jassm_chute_owned",
+      "owner": "Set to the missile entity via chute:SetOwner(self).",
+      "position": "missile spawn position + Vector(0, 0, 105) \u2014 floats 105 units directly above.",
+      "model": "models/v92/parachutez/flying.mdl, scale 2.0.",
+      "sound_on_spawn": "npc/combine_soldier/zipline_clip1.wav (75 dB, pitch 110)."
+    }
+  },
+
+  "phase_2_freefall": {
+    "label": "Freefall (parachute attached)",
+    "think_rate": "1/66 s per tick (\u224866 Hz).",
+    "vertical_physics": {
+      "model": "Manual gravity + proportional drag giving true terminal velocity.",
+      "gravity_constant": "600 u/s\u00b2 (Source default), applied every tick as: velZ -= 600 * dt",
+      "drag_formula": "drag = k * |velZ|   where k = GRAVITY / FREEFALL_MAX_FALL = 600/320 \u2248 1.875",
+      "terminal_velocity": "320 u/s downward \u2014 drag exactly cancels gravity at this speed.",
+      "hard_clamp": "velZ is clamped to -320 u/s as a floating-point safety net."
+    },
+    "horizontal_physics": {
+      "direction": "FreefallHorizDir = CallDir (XY unit vector of AC-130 heading at drop).",
+      "speed_ramp": "FreefallHorizSpeed starts at 0 and increases each tick: speed = min(speed + 380 * dt * 0.7, 380). Reaches full 380 u/s in approximately 1.4 seconds.",
+      "result": "The missile glides diagonally \u2014 moving forward along the plane's heading while falling, simulating a realistic weapon release trajectory."
+    },
+    "position_integration": "SetPos( x + horizDir.x*horizSpeed*dt,  y + horizDir.y*horizSpeed*dt,  z + velZ*dt ) every tick.",
+    "cosmetic_attitude": {
+      "pitch": "Lerps toward -25\u00b0 proportional to fall speed fraction (0 at rest, -25\u00b0 at terminal velocity).",
+      "yaw": "Lerps toward glide direction angle so the nose tracks the horizontal motion.",
+      "roll": "Lerps toward 0\u00b0."
+    },
+    "parachute_behaviour": {
+      "think_rate": "1/60 s per tick (\u224860 Hz).",
+      "tracking": "Every tick: chute SetPos = missile:GetPos() + (0,0,105). Yaw matches missile yaw.",
+      "sway": "Pitch oscillates \u00b12.5\u00b0 at 1.2 rad/s via sin(SwayClock) for a natural hang.",
+      "detach_trigger": "Checks missile NWBool 'EngineOn' every tick. As soon as it is true, calls Detach().",
+      "detach_condition": "EngineOn becomes true the instant IgniteEngine() runs on the missile."
+    }
+  },
+
+  "phase_3_ignition_trigger": {
+    "label": "Ignition Altitude Check",
+    "checked_in": "ENT:Think() on the missile, every freefall tick.",
+    "condition": "newZ (post-integration Z) <= self.IgnitionAlt",
+    "snap": "Missile Z is hard-snapped to exactly IgnitionAlt to prevent overshoot.",
+    "calls": "self:IgniteEngine() \u2014 executes immediately in the same tick."
+  },
+
+  "phase_4_ignition": {
+    "label": "Engine Ignition (IgniteEngine)",
+    "guard": "Returns immediately if already ignited (idempotent).",
+    "steps_in_order": [
+      "1. EngineIgnited = true; NWBool 'EngineOn' = true.",
+      "2. Bodygroup 1 = 1 \u2014 wings EXTEND visually.",
+      "3. PhysicsInit(SOLID_VPHYSICS) \u2014 switches from MOVETYPE_NONE to MOVETYPE_VPHYSICS.",
+      "4. SetMoveType(MOVETYPE_VPHYSICS); SetSolid(SOLID_VPHYSICS).",
+      "5. PhysObj:Wake(); PhysObj:EnableGravity(false) \u2014 engine owns altitude, not gravity.",
+      "6. Seed initial velocity: forward * max(Speed, FreefallHorizSpeed), Z=0. This preserves the horizontal glide momentum from freefall \u2014 no jarring velocity reset.",
+      "7. Fire HelicopterMegaBomb effect at exhaust position (GetPos - GetForward*55).",
+      "8. Play ignition sounds: gas_burst1.wav + fire_large_loop1.wav.",
+      "9. CreateSound ENGINE_LOOP_SOUND (^jet/luxor/external.wav), volume 1.0 fade-in over 0.5s."
+    ],
+    "parachute_decoupling_side_effect": "Setting NWBool 'EngineOn' = true causes the chute entity's next Think() tick (within 1/60 s) to call Detach(). The chute entity is replaced by a prop_physics clone that tumbles and drifts away with random velocity (\u00b180 XY, -40 to +20 Z) and random angular velocity (\u00b160\u00b0). The prop auto-removes after 12 seconds. A zipline_clip2.wav sound plays at decoupling."
+  },
+
+  "phase_5_climb_to_orbit": {
+    "label": "Post-Ignition Climb (PhysicsUpdate)",
+    "driven_by": "ENT:PhysicsUpdate() \u2014 runs every physics frame, only when EngineIgnited = true.",
+    "altitude_controller": {
+      "type": "Proportional controller (P-controller).",
+      "formula": "vel.z = Clamp( (liveAlt - pos.z) * 8,  -120,  120 )",
+      "liveAlt": "AltDriftCurrent + jitter. AltDriftCurrent starts at OrbitAlt and lerps toward AltDriftTarget (picked every 10-25 s within \u00b1700 units of OrbitAlt).",
+      "climb_behaviour": "On ignition the missile is at IgnitionAlt. liveAlt \u2248 OrbitAlt = IgnitionAlt + 600. altError = 600 \u2192 vel.z = min(600*8, 120) = 120 u/s upward immediately. As the missile rises, altError shrinks and vel.z proportionally reduces. The missile asymptotically approaches OrbitAlt with no overshoot.",
+      "max_climb_rate": "120 u/s upward.",
+      "max_descent_rate": "120 u/s downward (for altitude corrections during loiter)."
+    },
+    "horizontal_orbit": {
+      "orbit_radius": "2500 u base * rand(0.82, 1.18) per missile.",
+      "orbit_speed": "420 u/s base * rand(0.85, 1.15) \u2014 resolves to ~357\u2013483 u/s.",
+      "orbit_direction": "Random CW or CCW per missile.",
+      "angular_speed": "OrbitAngSpeed = Speed / OrbitRadius * OrbitDir (radians/s).",
+      "orbit_angle_update": "OrbitAngle += OrbitAngSpeed * dt every physics frame.",
+      "desired_position": "CenterPos + (cos(OrbitAngle), sin(OrbitAngle), 0) * OrbitRadius.",
+      "position_correction": "If posErr > 20 u, adds posErr:GetNormalized() * 80 to vel to keep the missile on the circle.",
+      "center_wander": "BaseCenterPos drifts sinusoidally \u00b160\u2013160 units in XY at slow rates (0.003\u20130.010 rad/frame) to prevent a perfectly fixed circle."
+    },
+    "attitude_during_climb": {
+      "yaw": "Tracks tangent of orbit circle with a soft correction of \u00b10.6\u00b0/frame.",
+      "roll": "Banks into turns: proportional to yaw delta * -25, clamped \u00b130\u00b0, smoothed.",
+      "pitch": "Based on forward speed ratio * 10\u00b0, clamped \u00b115\u00b0, smoothed."
+    }
+  },
+
+  "phase_6_loiter_to_dive": {
+    "label": "Loiter \u2192 WeaponWindow \u2192 Dive",
+    "weapon_window_interval": "8 seconds.",
+    "roll_each_window": "math.random(1,3): 1=peaceful_1, 2=peaceful_2, 3=dive.",
+    "dive_telegraph": "1-second build-up where nose pitches toward -60\u00b0 before committing. If no alive player is found, the dive is cancelled and a new window begins.",
+    "on_commit": "Locks nearest alive player, applies random aim offset \u00b1400 XY, switches collision to COLLISION_GROUP_NONE, sets SOLID_VPHYSICS, then UpdateDive() takes over at 2200 u/s (ramping from 55% = 1210 u/s)."
+  },
+
+  "key_values_summary": {
+    "FREEFALL_GRAVITY":     "600 u/s\u00b2",
+    "FREEFALL_MAX_FALL":    "320 u/s  (terminal velocity)",
+    "FREEFALL_DRAG_K":      "1.875  (= 600 / 320)",
+    "FREEFALL_THINK_DT":    "0.01515 s  (1/66)",
+    "FREEFALL_HORIZ_SPEED": "380 u/s  (max horizontal glide during freefall)",
+    "CHUTE_ABOVE":          "105 units above missile origin",
+    "ORBIT_ALT_RISE":       "600 units above IgnitionAlt",
+    "SkyHeightAdd_default": "2500 units above ground",
+    "IgnitionAlt_formula":  "ground + 2500 + rand(-625, +625)",
+    "OrbitAlt_formula":     "IgnitionAlt + 600",
+    "OrbitSpeed_base":      "420 u/s",
+    "OrbitRadius_base":     "2500 u",
+    "MaxClimbRate":         "120 u/s",
+    "DIVE_Speed":           "2200 u/s",
+    "WeaponWindow":         "8 s"
+  }
+}
