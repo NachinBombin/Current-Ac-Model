@@ -42,12 +42,6 @@ local HORIZ_GLIDE_RAMP     = 1.4   -- seconds to reach max horiz speed
 -- Range: SkyHeightAdd * 0.35  (≈875 u above ground for default 2500)
 local IGNITION_ALT_FRAC    = 0.35
 
--- FIX 1: clearance offsets so the combo spawns clear of the plane fuselage.
--- The plane model is ~800 u long; 500 u back + 180 u down guarantees the
--- missile exits the bounding box before the first freefall Think tick.
-local SPAWN_BACK_CLEARANCE = 500   -- units behind the plane along CallDir
-local SPAWN_DOWN_CLEARANCE = 180   -- units below the plane belly
-
 ENT.WeaponWindow  = 8
 ENT.FadeDuration  = 0.0   -- no fade-in; appears solid from drop
 
@@ -121,11 +115,12 @@ function ENT:Initialize()
 	self.SpawnTime = CurTime()
 
 	-- --------------------------------------------------------
-	-- FREEFALL PHASE
+	-- FREEFALL PHASE: spawn position is set by the plane before
+	-- Spawn+Activate is called. We do NOT override self:GetPos() here.
 	-- --------------------------------------------------------
 	self.Phase = "freefall"
-	self.FreefallVelZ      = 0
-	self.FreefallHorizT    = 0
+	self.FreefallVelZ       = 0
+	self.FreefallHorizT     = 0
 	self.FreefallHorizSpeed = 0
 
 	local baseRadius = self:GetVar("OrbitRadius", 2500)
@@ -134,31 +129,12 @@ function ENT:Initialize()
 	self.Speed       = baseSpeed  * math.Rand(0.85, 1.15)
 	self.OrbitDir    = (math.random(0,1) == 0) and 1 or -1
 
-	-- FIX 1: offset spawn position away from the plane fuselage.
-	-- SPAWN_BACK_CLEARANCE units behind along CallDir so the missile
-	-- starts outside the plane's bounding box, and SPAWN_DOWN_CLEARANCE
-	-- units below so it immediately falls away on the first Think tick.
-	local backVec  = self.CallDir * -SPAWN_BACK_CLEARANCE
-	local spawnPos = Vector(
-		self.CenterPos.x + backVec.x,
-		self.CenterPos.y + backVec.y,
-		self.sky - SPAWN_DOWN_CLEARANCE
-	)
-
-	if not util.IsInWorld(spawnPos) then
-		spawnPos = Vector(self.CenterPos.x, self.CenterPos.y, self.sky - SPAWN_DOWN_CLEARANCE)
-	end
-	if not util.IsInWorld(spawnPos) then
-		self:Debug("Spawn position out of world") self:Remove() return
-	end
-
 	-- Model and physics — MOVETYPE_NONE during freefall (manual integration)
 	self:SetModel("models/sw/usa/bombs/guided/gbu53.mdl")
 	self:SetModelScale(1.0, 0)
 	self:SetMoveType(MOVETYPE_NONE)
 	self:SetSolid(SOLID_NONE)
 	self:SetCollisionGroup(COLLISION_GROUP_NONE)
-	self:SetPos(spawnPos)
 	self:SetRenderMode(RENDERMODE_NORMAL)
 
 	self:SetNWInt("HP",    self.MaxHP)
@@ -245,14 +221,14 @@ function ENT:Initialize()
 	self.ObsAltBias    = 0
 	self.ObsConsecHits = 0
 
-	-- FIX 2: delay chute spawn to 0.1s so the missile has moved at least
-	-- one freefall tick away from the plane before children are attached.
+	-- Delay chute spawn by 0.1s so the missile has moved at least one
+	-- freefall Think tick away from the plane before children attach.
 	timer.Simple(0.1, function()
 		if not IsValid(self) then return end
 		self:SpawnChute()
 	end)
 
-	self:Debug("Spawned at " .. tostring(spawnPos) .. " — freefall phase, ignAt=" .. math.Round(self.IgnitionAlt))
+	self:Debug("Spawned at " .. tostring(self:GetPos()) .. " — freefall phase, ignAt=" .. math.Round(self.IgnitionAlt))
 end
 
 -- ============================================================
