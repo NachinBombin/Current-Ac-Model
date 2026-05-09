@@ -161,8 +161,17 @@ ENT.GUN105_Scatter       = 400
 ENT.GAU_Spray_Delay        = 0.033
 ENT.GAU_SprayPauseDuration = 0.6
 
+-- 40mm muzzle: forward/right offset from plane center, Z locked to sky
 ENT.MuzzleForwardOffset  = 250
 ENT.MuzzleSideOffset     = -60
+
+-- GAU muzzle: same system as 40mm.
+-- Furthest-back position on the model (rearmost of the old 3-point table).
+-- Negative forward = toward the tail; negative right = port (left) side.
+ENT.GAU_MuzzleForwardOffset = -300
+ENT.GAU_MuzzleSideOffset    = -250
+ENT.GAU_MuzzleUpOffset      = 50
+
 ENT.Plane_Ambient_SoundPath = "ac/bomber_engine_high.wav"
 
 ENT.JASSM_AltOffset  = 500
@@ -170,12 +179,6 @@ ENT.JASSM_TailOffset = Vector(-420, 0, 0)
 
 ENT.MaxHP = 8000
 ENT.DamageTierThresholds = { 0.75, 0.50, 0.25 }
-
-ENT.MuzzlePoints = {
-    Vector(300, -250, 50),
-    Vector(0,   -250, 50),
-    Vector(-300,-250, 50),
-}
 
 function ENT:Initialize()
     self.CenterPos    = self:GetVar("CenterPos", self:GetPos())
@@ -262,8 +265,6 @@ function ENT:Initialize()
     self.GAU_ActiveBursts   = {}
     self.GAU_SweepStartPos  = nil
     self.GAU_SweepEndPos    = nil
-    self.MuzzleIndexGlobal  = 1
-    self.MuzzleIndexWeapon  = 1
     self.IsDestroyed        = false
     self.DamageTier         = 0
     self.JASSM_DeployCount  = 0
@@ -431,10 +432,6 @@ function ENT:ArmWeapon(weapon, ct)
     self.CurrentWeapon   = weapon
     self.WeaponWindowEnd = ct + self.WeaponWindow
     self:Debug("Armed: " .. self.CurrentWeapon)
-    if self.MuzzleIndexGlobal < 1 or self.MuzzleIndexGlobal > #self.MuzzlePoints then
-        self.MuzzleIndexGlobal = 1
-    end
-    self.MuzzleIndexWeapon = self.MuzzleIndexGlobal
     if self.CurrentWeapon == "25mm" then
         self.GAU_BurstTimes   = { ct + self.GAU_FirstBurstTime, ct + self.GAU_SecondBurstTime }
         self.GAU_BurstsFired  = 0
@@ -504,6 +501,18 @@ function ENT:GetTargetGroundPos()
     return basePos + offsetDir * offsetDist
 end
 
+-- GAU muzzle: forward/right/up offsets from plane center.
+-- Z is NOT locked to sky so the up offset places it on the model correctly.
+function ENT:GetGAUMuzzlePos()
+    local pos   = self:GetPos()
+    local ang   = self:GetAngles()
+    return pos
+        + ang:Forward() * self.GAU_MuzzleForwardOffset
+        + ang:Right()   * self.GAU_MuzzleSideOffset
+        + ang:Up()      * self.GAU_MuzzleUpOffset
+end
+
+-- 40mm muzzle: same system, Z locked to sky altitude.
 function ENT:GetMuzzlePos()
     local pos     = self:GetPos()
     local ang     = self:GetAngles()
@@ -514,16 +523,9 @@ function ENT:GetMuzzlePos()
     return muzzle
 end
 
-function ENT:GetWeaponMuzzleWorldPos()
-    if self.MuzzleIndexWeapon < 1 or self.MuzzleIndexWeapon > #self.MuzzlePoints then
-        self.MuzzleIndexWeapon = 1
-    end
-    return self:LocalToWorld(self.MuzzlePoints[self.MuzzleIndexWeapon])
-end
-
 function ENT:SpawnGAUMuzzleFX()
-    local localPos = self.MuzzlePoints[self.MuzzleIndexWeapon] or Vector(0,0,0)
-    local worldPos = self:LocalToWorld(localPos)
+    local worldPos = self:GetGAUMuzzlePos()
+    local localPos = self:WorldToLocal(worldPos)
     local ang      = self:GetAngles()
 
     net.Start("bombin_muzzle_flash")
@@ -607,7 +609,6 @@ function ENT:StartGAUBurst()
     sweepDir:Normalize()
     self.GAU_SweepStartPos = targetPos - sweepDir * self.GAU_SweepHalfLength
     self.GAU_SweepEndPos   = targetPos + sweepDir * self.GAU_SweepHalfLength
-    -- First flash + sound at burst start
     self:SpawnGAUMuzzleFX()
     table.insert(self.GAU_ActiveBursts, { bulletsFired = 0, nextTime = CurTime() })
     self:EmitSpatialSound(
@@ -624,7 +625,6 @@ function ENT:UpdateActiveGAUBursts(ct)
         elseif ct >= burst.nextTime then
             burst.bulletsFired = burst.bulletsFired + 1
             burst.nextTime     = ct + self.GAU_BurstDelay
-            -- Flash on EVERY bullet
             self:SpawnGAUMuzzleFX()
             self:FireSingleGAUBullet(burst.bulletsFired)
             if burst.bulletsFired >= self.GAU_BurstCount then
@@ -642,7 +642,7 @@ function ENT:FireSingleGAUBullet(bulletIndex)
         math.Rand(-self.GAU_JitterAmount, self.GAU_JitterAmount),
         math.Rand(-self.GAU_JitterAmount, self.GAU_JitterAmount), 0
     )
-    local muzzlePos = self:GetWeaponMuzzleWorldPos()
+    local muzzlePos = self:GetGAUMuzzlePos()
     self:FireGAUBulletAt(muzzlePos, baseImpact + jitter, bulletIndex)
 end
 
@@ -655,14 +655,13 @@ function ENT:Update25mmSpray(ct)
     if ct < self.NextShotTimeSpray then return end
     self.NextShotTimeSpray = ct + self.GAU_Spray_Delay
     self.SprayBulletCount  = self.SprayBulletCount + 1
-    -- Flash on every spray bullet too
     self:SpawnGAUMuzzleFX()
     local targetPos   = self:GetTargetGroundPos()
     local finalImpact = targetPos + Vector(
         math.Rand(-self.GAU_JitterAmount * 2, self.GAU_JitterAmount * 2),
         math.Rand(-self.GAU_JitterAmount * 2, self.GAU_JitterAmount * 2), 0
     )
-    self:FireGAUBulletAt(self:GetWeaponMuzzleWorldPos(), finalImpact, self.SprayBulletCount)
+    self:FireGAUBulletAt(self:GetGAUMuzzlePos(), finalImpact, self.SprayBulletCount)
 end
 
 function ENT:Update40mm(ct)
