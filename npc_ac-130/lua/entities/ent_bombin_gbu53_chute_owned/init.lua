@@ -18,8 +18,8 @@
 -- Detach trigger: missile:GetNWBool("EngineOn") = true
 -- On detach, all parenting is cleared and everything gets
 -- a random tumble velocity. The palette falls as debris.
--- COLLISION_GROUP_DEBRIS is set on the abandoned palette so
--- it cannot clip the missile (fixes known JASSM chute bug).
+-- COLLISION_GROUP_DEBRIS is set on all abandoned pieces so
+-- they cannot clip the missile (fixes known JASSM chute bug).
 -- ============================================================
 
 AddCSLuaFile("cl_init.lua")
@@ -39,24 +39,19 @@ local MUNITION_SCALE = 1.0
 local CHUTE_SCALE    = 2.2
 
 -- Offset of the palette centre relative to the missile
--- (palette sits just below the chute attachment point)
 local PALETTE_ABOVE_MISSILE = Vector(0, 0, 110)
 
 -- Chute sits above the palette
 local CHUTE_ABOVE_PALETTE = Vector(0, 0, 90)
 
 -- 4 munition positions on the palette (local space, XY plane)
--- Arranged in a 2×2 rectangle matching the palette footprint.
--- Adjust these if the model scale needs tweaking.
 local MUNITION_OFFSETS = {
-	Vector(  18,  10, -5 ),   -- front-starboard
-	Vector(  18, -10, -5 ),   -- front-port
-	Vector( -18,  10, -5 ),   -- rear-starboard
-	Vector( -18, -10, -5 ),   -- rear-port
+	Vector(  18,  10, -5 ),
+	Vector(  18, -10, -5 ),
+	Vector( -18,  10, -5 ),
+	Vector( -18, -10, -5 ),
 }
 
--- Munition yaw offsets so they don't all point identically
--- (purely cosmetic — adds natural "stacked" look)
 local MUNITION_YAW_OFFSETS = { 0, 0, 180, 180 }
 
 local SWAY_AMP  = 2.8    -- degrees, palette sway amplitude
@@ -76,12 +71,14 @@ function ENT:Initialize()
 	self:SetCollisionGroup(COLLISION_GROUP_NONE)
 	self:DrawShadow(false)
 
-	self.SwayClock   = math.Rand(0, math.pi * 2)
+	self.SwayClock    = math.Rand(0, math.pi * 2)
 	self.MunitionEnts = {}
-	self.ChuteEnt    = nil
-	self.Detached    = false
+	self.ChuteEnt     = nil
+	self.Detached     = false
 
-	-- Spawn child props after one tick so the palette has a valid EntIndex
+	-- FIX 2 is applied in the missile (timer.Simple(0.1) before SpawnChute).
+	-- Here we spawn children immediately since the palette is already
+	-- positioned correctly when Initialize() is called (missile moved first).
 	timer.Simple(0, function()
 		if not IsValid(self) then return end
 		self:SpawnChildren()
@@ -92,6 +89,9 @@ end
 
 -- ============================================================
 -- SPAWN CHILDREN  (chute + 4 munitions)
+-- FIX 3: SetParent is called BEFORE Spawn+Activate so VPhysics
+-- initialises each child already in parented/local space, preventing
+-- the one-tick snap to world origin that was placing them inside the plane.
 -- ============================================================
 
 function ENT:SpawnChildren()
@@ -101,6 +101,10 @@ function ENT:SpawnChildren()
 		chute:SetModel(CHUTE_MODEL)
 		chute:SetPos(self:GetPos() + CHUTE_ABOVE_PALETTE)
 		chute:SetAngles(self:GetAngles())
+		-- FIX 3: parent before Spawn/Activate
+		chute:SetParent(self)
+		chute:SetLocalPos(CHUTE_ABOVE_PALETTE)
+		chute:SetLocalAngles(Angle(0, 0, 0))
 		chute:Spawn()
 		chute:Activate()
 		chute:SetModelScale(CHUTE_SCALE, 0)
@@ -108,10 +112,6 @@ function ENT:SpawnChildren()
 		chute:SetSolid(SOLID_NONE)
 		chute:SetCollisionGroup(COLLISION_GROUP_NONE)
 		chute:DrawShadow(false)
-		-- Parent to this palette entity so it moves with us
-		chute:SetParent(self)
-		chute:SetLocalPos(CHUTE_ABOVE_PALETTE)
-		chute:SetLocalAngles(Angle(0, 0, 0))
 		self.ChuteEnt = chute
 	end
 
@@ -123,6 +123,10 @@ function ENT:SpawnChildren()
 		mun:SetModel(MUNITION_MODEL)
 		mun:SetPos(self:GetPos() + MUNITION_OFFSETS[i])
 		mun:SetAngles(Angle(0, (self:GetAngles().y + MUNITION_YAW_OFFSETS[i]), 0))
+		-- FIX 3: parent before Spawn/Activate
+		mun:SetParent(self)
+		mun:SetLocalPos(MUNITION_OFFSETS[i])
+		mun:SetLocalAngles(Angle(0, MUNITION_YAW_OFFSETS[i], 0))
 		mun:Spawn()
 		mun:Activate()
 		mun:SetModelScale(MUNITION_SCALE, 0)
@@ -130,10 +134,6 @@ function ENT:SpawnChildren()
 		mun:SetSolid(SOLID_NONE)
 		mun:SetCollisionGroup(COLLISION_GROUP_NONE)
 		mun:DrawShadow(false)
-		-- Parent to palette
-		mun:SetParent(self)
-		mun:SetLocalPos(MUNITION_OFFSETS[i])
-		mun:SetLocalAngles(Angle(0, MUNITION_YAW_OFFSETS[i], 0))
 
 		self.MunitionEnts[i] = mun
 	end
@@ -152,13 +152,13 @@ function ENT:Think()
 		return
 	end
 
-	-- Check ignition signal — same NWBool as JASSM chute
+	-- Check ignition signal
 	if missile:GetNWBool("EngineOn", false) then
 		self:Detach()
 		return
 	end
 
-	-- Track missile, add sway
+	-- Track missile position, add sway
 	self.SwayClock = self.SwayClock + SWAY_RATE * THINK_DT
 	local sway      = math.sin(self.SwayClock) * SWAY_AMP
 	local missileAng = missile:GetAngles()
@@ -181,7 +181,7 @@ function ENT:Detach()
 	local pos = self:GetPos()
 	local ang = self:GetAngles()
 
-	-- Unparent all children so they tumble freely
+	-- Unparent all children before enabling physics on them
 	if IsValid(self.ChuteEnt) then
 		self.ChuteEnt:SetParent(nil)
 		self.ChuteEnt:SetPos(pos + CHUTE_ABOVE_PALETTE)
@@ -198,8 +198,7 @@ function ENT:Detach()
 	end
 
 	-- Convert palette to falling debris
-	-- BUG FIX: use COLLISION_GROUP_DEBRIS so it cannot collide with
-	-- the missile that just ignited below it.
+	-- COLLISION_GROUP_DEBRIS: cannot collide with the missile below.
 	self:PhysicsInit(SOLID_VPHYSICS)
 	self:SetMoveType(MOVETYPE_VPHYSICS)
 	self:SetSolid(SOLID_VPHYSICS)
@@ -251,7 +250,6 @@ function ENT:Detach()
 		local mPhys = mun:GetPhysicsObject()
 		if IsValid(mPhys) then
 			mPhys:Wake()
-			-- Each munition gets a unique outward scatter direction
 			local scatter = MUNITION_OFFSETS[i]:GetNormalized() * math.Rand(40, 100)
 			mPhys:SetVelocity(Vector(
 				scatter.x + math.Rand(-30, 30),
@@ -296,8 +294,6 @@ end
 -- ============================================================
 
 function ENT:OnRemove()
-	-- Children are cleaned up by FullRemove or the 14s timer.
-	-- If somehow we get here without that, clean up stragglers.
 	if self.Detached then return end
 	if IsValid(self.ChuteEnt) then self.ChuteEnt:Remove() end
 	for i = 1, 4 do
