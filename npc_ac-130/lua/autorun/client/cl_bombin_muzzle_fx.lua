@@ -2,9 +2,10 @@ if not CLIENT then return end
 
 -- ============================================================
 -- AC-130 MUZZLE FX
--- GAU bloom/flame: 1/3 of previous sizes
--- 40mm bloom/flame: 2/3 of previous sizes
--- Smoke unchanged.
+-- GAU flash:  x0.5 from previous
+-- 40mm flash: x0.5 from previous
+-- GAU smoke:  x2 (spawn size 28-56, expansion *5)
+-- 40mm smoke: x2 (spawn size 64-128, expansion *6.4)
 -- ============================================================
 
 local mat_flash = Material("effects/muzzleflash1")
@@ -16,6 +17,9 @@ local smoke_particles   = {}
 local flash40_entries   = {}
 local smoke40_particles = {}
 
+-- ============================================================
+-- GAU / 25mm
+-- ============================================================
 net.Receive("bombin_muzzle_flash", function()
     local entIdx   = net.ReadUInt(16)
     local localPos = net.ReadVector()
@@ -38,6 +42,7 @@ net.Receive("bombin_muzzle_flash", function()
     ed:SetRadius(16)
     util.Effect("ManhackSparks", ed)
 
+    -- GAU smoke: spawn size doubled (14-28 -> 28-56)
     for i = 1, 8 do
         smoke_particles[#smoke_particles + 1] = {
             entIdx   = entIdx,
@@ -45,12 +50,15 @@ net.Receive("bombin_muzzle_flash", function()
             vel      = Vector(math.Rand(-8,8), math.Rand(-8,8), math.Rand(18,40)),
             born     = now + (i - 1) * 0.04,
             expire   = now + (i - 1) * 0.04 + 1.4,
-            size     = math.Rand(14, 28),
+            size     = math.Rand(28, 56),   -- was 14-28
             fallback = firePos + Vector(math.Rand(-6,6), math.Rand(-6,6), math.Rand(0,8)),
         }
     end
 end)
 
+-- ============================================================
+-- 40mm Bofors
+-- ============================================================
 net.Receive("bombin_muzzle_flash_40mm", function()
     local entIdx   = net.ReadUInt(16)
     local localPos = net.ReadVector()
@@ -81,13 +89,14 @@ net.Receive("bombin_muzzle_flash_40mm", function()
     ed2:SetRadius(18)
     util.Effect("ManhackSparks", ed2)
 
+    -- 40mm smoke: spawn size doubled (32-64 -> 64-128)
     for i = 1, 16 do
         smoke40_particles[#smoke40_particles + 1] = {
             pos    = firePos + Vector(math.Rand(-10,10), math.Rand(-10,10), math.Rand(0,12)),
             vel    = Vector(math.Rand(-12,12), math.Rand(-12,12), math.Rand(22,55)),
             born   = now + (i - 1) * 0.035,
             expire = now + (i - 1) * 0.035 + 2.4,
-            size   = math.Rand(32, 64),
+            size   = math.Rand(64, 128),   -- was 32-64
         }
     end
 end)
@@ -110,7 +119,7 @@ hook.Add("PostDrawTranslucentRenderables", "bombin_muzzle_fx_draw", function(dep
     local ct  = UnPredictedCurTime()
     local eye = EyePos()
 
-    -- GAU SMOKE (unchanged)
+    -- GAU SMOKE  (spawn size x2, expansion rate x2: 2.5->5)
     if #smoke_particles > 0 then
         render.SetMaterial(mat_smoke)
         local keep = {}
@@ -123,14 +132,14 @@ hook.Add("PostDrawTranslucentRenderables", "bombin_muzzle_fx_draw", function(dep
             if     frac < 0.15 then alpha = (frac / 0.15) * 145
             elseif frac < 0.70 then alpha = 145
             else                     alpha = (1 - (frac - 0.70) / 0.30) * 145 end
-            local sz      = s.size * (1 + frac * 2.5)
+            local sz = s.size * (1 + frac * 5)   -- expansion was 2.5
             render.DrawSprite(GetSmokeDrawPos(s, life), sz, sz, Color(40, 36, 34, alpha))
             keep[#keep + 1] = s
         end
         smoke_particles = keep
     end
 
-    -- 40mm SMOKE (unchanged)
+    -- 40mm SMOKE  (spawn size x2, expansion rate x2: 3.2->6.4)
     if #smoke40_particles > 0 then
         render.SetMaterial(mat_smoke)
         local keep = {}
@@ -143,16 +152,15 @@ hook.Add("PostDrawTranslucentRenderables", "bombin_muzzle_fx_draw", function(dep
             if     frac < 0.12 then alpha = (frac / 0.12) * 170
             elseif frac < 0.65 then alpha = 170
             else                     alpha = (1 - (frac - 0.65) / 0.35) * 170 end
-            local sz      = s.size * (1 + frac * 3.2)
+            local sz = s.size * (1 + frac * 6.4)   -- expansion was 3.2
             render.DrawSprite(s.pos + s.vel * life, sz, sz, Color(28, 24, 22, alpha))
             keep[#keep + 1] = s
         end
         smoke40_particles = keep
     end
 
-    -- GAU BLOOM + FLAME  — 1/3 of previous sizes
-    -- Previous: base = Clamp(300 + dist*0.22, 300, 2000)
-    -- Now:      base = Clamp(100 + dist*0.073, 100, 667)
+    -- GAU BLOOM + FLAME  — x0.5 from previous (was x1/3, now x1/6 of original)
+    -- base: Clamp(100+dist*0.073, 100, 667) -> Clamp(50+dist*0.037, 50, 334)
     if #muzzle_flashes > 0 then
         local keep = {}
         render.SetMaterial(mat_flash)
@@ -160,7 +168,7 @@ hook.Add("PostDrawTranslucentRenderables", "bombin_muzzle_fx_draw", function(dep
             if ct > f.expire then continue end
             local wpos = GetLivePos(f)
             local dist = eye:Distance(wpos)
-            local sz   = math.Clamp(100 + dist * 0.073, 100, 667)
+            local sz   = math.Clamp(50 + dist * 0.037, 50, 334)
             render.DrawSprite(wpos, sz, sz, Color(255, 220, 100, 255))
             keep[#keep + 1] = f
         end
@@ -169,7 +177,7 @@ hook.Add("PostDrawTranslucentRenderables", "bombin_muzzle_fx_draw", function(dep
             if ct > f.fexpire then continue end
             local wpos = GetLivePos(f)
             local dist = eye:Distance(wpos)
-            local base = math.Clamp(100 + dist * 0.073, 100, 667)
+            local base = math.Clamp(50 + dist * 0.037, 50, 334)
             local w    = base * 3.2
             local h    = base * 1.4
             render.DrawSprite(wpos, w, h, Color(255, 200, 80, 230))
@@ -178,13 +186,10 @@ hook.Add("PostDrawTranslucentRenderables", "bombin_muzzle_fx_draw", function(dep
         muzzle_flashes = keep
     end
 
-    -- 40mm BLOOM + FLAME  — 2/3 of previous sizes
-    -- Previous bloom:  Clamp(400 + dist*0.3,  400, 1600)
-    -- Now:             Clamp(267 + dist*0.2,  267, 1067)
-    -- Previous corona: Clamp(600 + dist*0.44, 600, 2200)
-    -- Now:             Clamp(400 + dist*0.293, 400, 1467)
-    -- Previous base:   Clamp(180 + dist*0.13, 180, 1000)
-    -- Now:             Clamp(120 + dist*0.087, 120, 667)
+    -- 40mm BLOOM + FLAME  — x0.5 from previous
+    -- bloom:  Clamp(267+dist*0.2,  267, 1067) -> Clamp(134+dist*0.1,  134, 534)
+    -- corona: Clamp(400+dist*0.293,400, 1467) -> Clamp(200+dist*0.147, 200, 734)
+    -- base:   Clamp(120+dist*0.087,120, 667)  -> Clamp(60 +dist*0.044, 60,  334)
     if #flash40_entries > 0 then
         local keep = {}
         render.SetMaterial(mat_flash)
@@ -192,9 +197,9 @@ hook.Add("PostDrawTranslucentRenderables", "bombin_muzzle_fx_draw", function(dep
             if ct > f.expire then continue end
             local wpos = GetLivePos(f)
             local dist = eye:Distance(wpos)
-            local sz   = math.Clamp(267 + dist * 0.2,   267, 1067)
+            local sz   = math.Clamp(134 + dist * 0.1,   134, 534)
             render.DrawSprite(wpos, sz, sz, Color(255, 160, 40, 255))
-            local szc  = math.Clamp(400 + dist * 0.293, 400, 1467)
+            local szc  = math.Clamp(200 + dist * 0.147, 200, 734)
             render.DrawSprite(wpos + Vector(0,0,10), szc, szc, Color(255, 120, 20, 90))
             keep[#keep + 1] = f
         end
@@ -203,7 +208,7 @@ hook.Add("PostDrawTranslucentRenderables", "bombin_muzzle_fx_draw", function(dep
             if ct > f.fexpire then continue end
             local wpos = GetLivePos(f)
             local dist = eye:Distance(wpos)
-            local base = math.Clamp(120 + dist * 0.087, 120, 667)
+            local base = math.Clamp(60 + dist * 0.044, 60, 334)
             local w    = base * 2.56
             local h    = base * 1.12
             render.DrawSprite(wpos, w, h, Color(255, 140, 30, 240))
