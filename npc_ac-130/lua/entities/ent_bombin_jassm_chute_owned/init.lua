@@ -5,6 +5,13 @@
 -- Fixes vs source repo:
 --   1. Think() throttled to ~60 Hz (was running every server tick).
 --   2. Uses ent_bombin_jassm_owned class reference.
+--   3. FIX: Initialize() used COLLISION_GROUP_WORLD, which makes the entity
+--      collide as if it were world geometry. Changed to
+--      COLLISION_GROUP_INTERACTIVE_DEBRIS — correct for a kinematic
+--      freefall prop that should be ignored by most traces and not block
+--      bullets or physics objects. The abandoned prop_physics clone in
+--      Detach() also now explicitly uses COLLISION_GROUP_INTERACTIVE_DEBRIS
+--      so both the live chute and its detached remnant are consistent.
 
 AddCSLuaFile("cl_init.lua")
 AddCSLuaFile("shared.lua")
@@ -22,7 +29,10 @@ function ENT:Initialize()
 	self:SetModelScale(CHUTE_SCALE, 0)
 	self:SetMoveType(MOVETYPE_NONE)
 	self:SetSolid(SOLID_NONE)
-	self:SetCollisionGroup(COLLISION_GROUP_WORLD)
+	-- FIX: was COLLISION_GROUP_WORLD, which causes the entity to be treated
+	-- as world geometry. INTERACTIVE_DEBRIS is correct for a passive
+	-- freefall visual that should not interfere with projectiles or physics.
+	self:SetCollisionGroup(COLLISION_GROUP_INTERACTIVE_DEBRIS)
 	self:DrawShadow(false)
 
 	self.SwayClock = math.Rand(0, math.pi * 2)
@@ -66,6 +76,9 @@ function ENT:Detach()
 		abandon:Spawn()
 		abandon:Activate()
 		abandon:SetModelScale(CHUTE_SCALE, 0)
+		-- FIX: explicitly set debris group on the abandoned prop so it is
+		-- consistent with the live chute and does not block traces.
+		abandon:SetCollisionGroup(COLLISION_GROUP_INTERACTIVE_DEBRIS)
 
 		local phys = abandon:GetPhysicsObject()
 		if IsValid(phys) then
