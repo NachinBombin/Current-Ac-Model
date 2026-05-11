@@ -2,10 +2,14 @@ if not CLIENT then return end
 
 -- ============================================================
 -- AC-130 MUZZLE FX
--- GAU flash:  x0.5 from previous
--- 40mm flash: x0.5 from previous
--- GAU smoke:  x2 (spawn size 28-56, expansion *5)
--- 40mm smoke: x2 (spawn size 64-128, expansion *6.4)
+-- Each flash entry stores a random scale multiplier chosen at
+-- receive time. This makes every shot a different size while
+-- keeping the flash stable during its own lifetime.
+--
+-- GAU  scale range : 0.35 - 1.0  of the distance-based max
+-- 40mm scale range : 0.40 - 1.0  of the distance-based max
+--
+-- Smoke unchanged.
 -- ============================================================
 
 local mat_flash = Material("effects/muzzleflash1")
@@ -26,23 +30,26 @@ net.Receive("bombin_muzzle_flash", function()
     local now      = UnPredictedCurTime()
     local firePos  = net.ReadVector()
 
+    -- Random scale for THIS shot: 35% to 100% of the distance-based max
+    local scale = math.Rand(0.35, 1.0)
+
     muzzle_flashes[#muzzle_flashes + 1] = {
         entIdx   = entIdx,
         localPos = localPos,
         firePos  = firePos,
         expire   = now + 0.08,
         fexpire  = now + 0.05,
+        scale    = scale,
     }
 
     local ed = EffectData()
     ed:SetOrigin(firePos)
     ed:SetNormal(Vector(0, 0, -1))
-    ed:SetScale(2.4)
+    ed:SetScale(2.4 * scale)
     ed:SetMagnitude(2)
     ed:SetRadius(16)
     util.Effect("ManhackSparks", ed)
 
-    -- GAU smoke: spawn size doubled (14-28 -> 28-56)
     for i = 1, 8 do
         smoke_particles[#smoke_particles + 1] = {
             entIdx   = entIdx,
@@ -50,7 +57,7 @@ net.Receive("bombin_muzzle_flash", function()
             vel      = Vector(math.Rand(-8,8), math.Rand(-8,8), math.Rand(18,40)),
             born     = now + (i - 1) * 0.04,
             expire   = now + (i - 1) * 0.04 + 1.4,
-            size     = math.Rand(28, 56),   -- was 14-28
+            size     = math.Rand(28, 56),
             fallback = firePos + Vector(math.Rand(-6,6), math.Rand(-6,6), math.Rand(0,8)),
         }
     end
@@ -65,18 +72,22 @@ net.Receive("bombin_muzzle_flash_40mm", function()
     local now      = UnPredictedCurTime()
     local firePos  = net.ReadVector()
 
+    -- Random scale for THIS shot: 40% to 100% of the distance-based max
+    local scale = math.Rand(0.40, 1.0)
+
     flash40_entries[#flash40_entries + 1] = {
         entIdx   = entIdx,
         localPos = localPos,
         firePos  = firePos,
         expire   = now + 0.12,
         fexpire  = now + 0.075,
+        scale    = scale,
     }
 
     local ed = EffectData()
     ed:SetOrigin(firePos)
     ed:SetNormal(Vector(0, 0, -1))
-    ed:SetScale(3.6)
+    ed:SetScale(3.6 * scale)
     ed:SetMagnitude(4)
     ed:SetRadius(28)
     util.Effect("ManhackSparks", ed)
@@ -84,19 +95,18 @@ net.Receive("bombin_muzzle_flash_40mm", function()
     local ed2 = EffectData()
     ed2:SetOrigin(firePos + Vector(math.Rand(-12,12), math.Rand(-12,12), math.Rand(-4,4)))
     ed2:SetNormal(Vector(0, 0, -1))
-    ed2:SetScale(2.2)
+    ed2:SetScale(2.2 * scale)
     ed2:SetMagnitude(3)
     ed2:SetRadius(18)
     util.Effect("ManhackSparks", ed2)
 
-    -- 40mm smoke: spawn size doubled (32-64 -> 64-128)
     for i = 1, 16 do
         smoke40_particles[#smoke40_particles + 1] = {
             pos    = firePos + Vector(math.Rand(-10,10), math.Rand(-10,10), math.Rand(0,12)),
             vel    = Vector(math.Rand(-12,12), math.Rand(-12,12), math.Rand(22,55)),
             born   = now + (i - 1) * 0.035,
             expire = now + (i - 1) * 0.035 + 2.4,
-            size   = math.Rand(64, 128),   -- was 32-64
+            size   = math.Rand(64, 128),
         }
     end
 end)
@@ -119,7 +129,7 @@ hook.Add("PostDrawTranslucentRenderables", "bombin_muzzle_fx_draw", function(dep
     local ct  = UnPredictedCurTime()
     local eye = EyePos()
 
-    -- GAU SMOKE  (spawn size x2, expansion rate x2: 2.5->5)
+    -- GAU SMOKE (unchanged)
     if #smoke_particles > 0 then
         render.SetMaterial(mat_smoke)
         local keep = {}
@@ -132,14 +142,14 @@ hook.Add("PostDrawTranslucentRenderables", "bombin_muzzle_fx_draw", function(dep
             if     frac < 0.15 then alpha = (frac / 0.15) * 145
             elseif frac < 0.70 then alpha = 145
             else                     alpha = (1 - (frac - 0.70) / 0.30) * 145 end
-            local sz = s.size * (1 + frac * 5)   -- expansion was 2.5
+            local sz = s.size * (1 + frac * 5)
             render.DrawSprite(GetSmokeDrawPos(s, life), sz, sz, Color(40, 36, 34, alpha))
             keep[#keep + 1] = s
         end
         smoke_particles = keep
     end
 
-    -- 40mm SMOKE  (spawn size x2, expansion rate x2: 3.2->6.4)
+    -- 40mm SMOKE (unchanged)
     if #smoke40_particles > 0 then
         render.SetMaterial(mat_smoke)
         local keep = {}
@@ -152,15 +162,15 @@ hook.Add("PostDrawTranslucentRenderables", "bombin_muzzle_fx_draw", function(dep
             if     frac < 0.12 then alpha = (frac / 0.12) * 170
             elseif frac < 0.65 then alpha = 170
             else                     alpha = (1 - (frac - 0.65) / 0.35) * 170 end
-            local sz = s.size * (1 + frac * 6.4)   -- expansion was 3.2
+            local sz = s.size * (1 + frac * 6.4)
             render.DrawSprite(s.pos + s.vel * life, sz, sz, Color(28, 24, 22, alpha))
             keep[#keep + 1] = s
         end
         smoke40_particles = keep
     end
 
-    -- GAU BLOOM + FLAME  — x0.5 from previous (was x1/3, now x1/6 of original)
-    -- base: Clamp(100+dist*0.073, 100, 667) -> Clamp(50+dist*0.037, 50, 334)
+    -- GAU BLOOM + FLAME
+    -- Distance-based max is the ceiling; f.scale pulls it down randomly per shot.
     if #muzzle_flashes > 0 then
         local keep = {}
         render.SetMaterial(mat_flash)
@@ -168,7 +178,7 @@ hook.Add("PostDrawTranslucentRenderables", "bombin_muzzle_fx_draw", function(dep
             if ct > f.expire then continue end
             local wpos = GetLivePos(f)
             local dist = eye:Distance(wpos)
-            local sz   = math.Clamp(50 + dist * 0.037, 50, 334)
+            local sz   = math.Clamp(50 + dist * 0.037, 50, 334) * f.scale
             render.DrawSprite(wpos, sz, sz, Color(255, 220, 100, 255))
             keep[#keep + 1] = f
         end
@@ -177,7 +187,7 @@ hook.Add("PostDrawTranslucentRenderables", "bombin_muzzle_fx_draw", function(dep
             if ct > f.fexpire then continue end
             local wpos = GetLivePos(f)
             local dist = eye:Distance(wpos)
-            local base = math.Clamp(50 + dist * 0.037, 50, 334)
+            local base = math.Clamp(50 + dist * 0.037, 50, 334) * f.scale
             local w    = base * 3.2
             local h    = base * 1.4
             render.DrawSprite(wpos, w, h, Color(255, 200, 80, 230))
@@ -186,10 +196,8 @@ hook.Add("PostDrawTranslucentRenderables", "bombin_muzzle_fx_draw", function(dep
         muzzle_flashes = keep
     end
 
-    -- 40mm BLOOM + FLAME  — x0.5 from previous
-    -- bloom:  Clamp(267+dist*0.2,  267, 1067) -> Clamp(134+dist*0.1,  134, 534)
-    -- corona: Clamp(400+dist*0.293,400, 1467) -> Clamp(200+dist*0.147, 200, 734)
-    -- base:   Clamp(120+dist*0.087,120, 667)  -> Clamp(60 +dist*0.044, 60,  334)
+    -- 40mm BLOOM + FLAME
+    -- Same logic: distance-based max scaled by per-shot f.scale.
     if #flash40_entries > 0 then
         local keep = {}
         render.SetMaterial(mat_flash)
@@ -197,9 +205,9 @@ hook.Add("PostDrawTranslucentRenderables", "bombin_muzzle_fx_draw", function(dep
             if ct > f.expire then continue end
             local wpos = GetLivePos(f)
             local dist = eye:Distance(wpos)
-            local sz   = math.Clamp(134 + dist * 0.1,   134, 534)
+            local sz   = math.Clamp(134 + dist * 0.1,   134, 534) * f.scale
             render.DrawSprite(wpos, sz, sz, Color(255, 160, 40, 255))
-            local szc  = math.Clamp(200 + dist * 0.147, 200, 734)
+            local szc  = math.Clamp(200 + dist * 0.147, 200, 734) * f.scale
             render.DrawSprite(wpos + Vector(0,0,10), szc, szc, Color(255, 120, 20, 90))
             keep[#keep + 1] = f
         end
@@ -208,7 +216,7 @@ hook.Add("PostDrawTranslucentRenderables", "bombin_muzzle_fx_draw", function(dep
             if ct > f.fexpire then continue end
             local wpos = GetLivePos(f)
             local dist = eye:Distance(wpos)
-            local base = math.Clamp(60 + dist * 0.044, 60, 334)
+            local base = math.Clamp(60 + dist * 0.044, 60, 334) * f.scale
             local w    = base * 2.56
             local h    = base * 1.12
             render.DrawSprite(wpos, w, h, Color(255, 140, 30, 240))
