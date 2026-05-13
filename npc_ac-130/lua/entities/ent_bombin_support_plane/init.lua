@@ -32,6 +32,9 @@ local PEACEFUL_MAX = 7
 
 local JASSM_MAX_STOCK = 6
 
+-- Tumble gravity constant (units/s^2), same as C-17.
+local TUMBLE_GRAVITY = 600
+
 util.AddNetworkString("bombin_plane_damage_tier")
 util.AddNetworkString("bombin_plane_spatial_sound")
 util.AddNetworkString("bombin_105mm_direct_sound")
@@ -161,11 +164,9 @@ ENT.GUN105_Scatter       = 400
 ENT.GAU_Spray_Delay        = 0.033
 ENT.GAU_SprayPauseDuration = 0.6
 
--- 40mm muzzle: forward/right offset from plane center, Z locked to sky
 ENT.MuzzleForwardOffset  = 250
 ENT.MuzzleSideOffset     = -60
 
--- GAU muzzle: same system as 40mm.
 ENT.GAU_MuzzleForwardOffset = -300
 ENT.GAU_MuzzleSideOffset    = -250
 ENT.GAU_MuzzleUpOffset      = 50
@@ -221,6 +222,9 @@ function ENT:Initialize()
     self:SetAngles(Angle(0, ang.y - 90, 0))
     self.ang = self:GetAngles()
 
+    -- Store the current flight yaw so tumble can inherit it
+    self.flightYaw = ang.y - 90
+
     self.AltDriftCurrent  = self.sky
     self.AltDriftTarget   = self.sky
     self.AltDriftNextPick = CurTime() + math.Rand(12, 30)
@@ -264,13 +268,20 @@ function ENT:Initialize()
     self.GAU_SweepStartPos  = nil
     self.GAU_SweepEndPos    = nil
     self.IsDestroyed        = false
-    self.Destroyed          = false   -- tumble flag (mirrors C-17 convention)
     self.DamageTier         = 0
     self.JASSM_DeployCount  = 0
     self.JASSM_Stock        = JASSM_MAX_STOCK
     self.JASSM_SalvoFired   = 0
     self.IsPeaceful         = false
     self.PeacefulUntil      = 0
+
+    -- Tumble state (mirrors C-17)
+    self.IsTumbling        = false
+    self.TumbleLastTime    = 0
+    self.TumbleGroundZ     = ground
+    self.TumbleCrashed     = false
+    self.TumbleVelocity    = Vector(0, 0, 0)
+    self.TumbleAngVelocity = Vector(0, 0, 0)
 
     self:SetNWInt("JASSM_Spent", 0)
     self:SetNWInt("JASSM_Max",   JASSM_MAX_STOCK)
@@ -309,107 +320,181 @@ function ENT:OnTakeDamage(dmginfo)
     if hp <= 0 then self:Debug("Shot down!") self:DestroyPlane() end
 end
 
--- -----------------------------------------------------------------------
--- DestroyPlane  —  slow tumble + 4 staggered real explosions
--- -----------------------------------------------------------------------
+-- ============================================================
+-- TUMBLE  (exact C-17 system)
+-- ============================================================
+function ENT:StartTumble()
+    self.IsTumbling    = true
+    self.TumbleLastTime = CurTime()
+    self.TumbleCrashed = false
+
+    local gnd = self:FindGround(self:GetPos())
+    if gnd ~= -1 then self.TumbleGroundZ = gnd end
+
+    -- Inherit current flight velocity + push nose down
+    local fwd = Angle(0, self.flightYaw or self.ang.y, 0):Forward()
+    local spd = self.Speed or 300
+    self.TumbleVelocity = Vector(fwd.x * spd, fwd.y * spd, -80)
+
+    local function sign() return (math.random(2) == 1) and 1 or -1 end
+    self.TumbleAngVelocity = Vector(
+        math.Rand(8,  18) * sign(),   -- pitch
+        math.Rand(3,   8) * sign(),   -- yaw wobble
+        math.Rand(20, 40) * sign()    -- roll (main axis)
+    )
+
+    -- Take full position control away from PhysicsUpdate
+    self:SetMoveType(MOVETYPE_NONE)
+    local phys = self:GetPhysicsObject()
+    if IsValid(phys) then
+        phys:EnableGravity(false)
+        phys:SetVelocity(Vector(0, 0, 0))
+        phys:SetAngleVelocity(Vector(0, 0, 0))
+        phys:Sleep()
+    end
+
+    -- Initial damage explosion
+    local pos = self:GetPos()
+    local ed  = EffectData()
+    ed:SetOrigin(pos) ed:SetScale(4) ed:SetMagnitude(4) ed:SetRadius(400)
+    util.Effect("500lb_air", ed, true, true)
+    sound.Play("ambient/explosions/explode_4.wav", pos, 135, 95, 1.0)
+end
+
+function ENT:UpdateTumble(ct)
+    if not self.IsTumbling or self.TumbleCrashed then return end
+
+    local dt = ct - self.TumbleLastTime
+    self.TumbleLastTime = ct
+    if dt <= 0 or dt > 0.2 then return end
+
+    -- Apply gravity to Z velocity
+    self.TumbleVelocity.z = self.TumbleVelocity.z - TUMBLE_GRAVITY * dt
+
+    local pos    = self:GetPos()
+    local newPos = pos + self.TumbleVelocity * dt
+
+    -- Advance angles
+    local av = self.TumbleAngVelocity
+    self.ang = Angle(
+        self.ang.p + av.x * dt,
+        self.ang.y + av.y * dt,
+        self.ang.r + av.z * dt
+    )
+
+    -- Ground / wall hit check
+    local hitGround = newPos.z <= (self.TumbleGroundZ or -16384) + 200
+    local hitWall   = false
+    if not hitGround then
+        local tr = util.TraceLine({ start = pos, endpos = newPos, filter = self, mask = MASK_SOLID_BRUSHONLY })
+        hitWall = tr.HitWorld
+    end
+
+    if hitGround or hitWall then
+        self:CrashExplode()
+        return
+    end
+
+    self:SetPos(newPos)
+    self:SetAngles(self.ang)
+end
+
+function ENT:CrashExplode()
+    if self.TumbleCrashed then return end
+    self.TumbleCrashed = true
+
+    local pos = Vector(self:GetPos())
+    local entIdx = self:EntIndex()
+
+    -- Helper: one big explosion burst (same as what BigBlast was doing)
+    local function BigBlast(bpos)
+        local ed1 = EffectData()
+        ed1:SetOrigin(bpos) ed1:SetScale(7) ed1:SetMagnitude(7) ed1:SetRadius(700)
+        util.Effect("HelicopterMegaBomb", ed1, true, true)
+
+        local ed2 = EffectData()
+        ed2:SetOrigin(bpos + Vector(0, 0, 90)) ed2:SetScale(6) ed2:SetMagnitude(6) ed2:SetRadius(600)
+        util.Effect("500lb_air", ed2, true, true)
+
+        local ed3 = EffectData()
+        ed3:SetOrigin(bpos + Vector(0, 0, 200)) ed3:SetScale(5) ed3:SetMagnitude(5) ed3:SetRadius(500)
+        util.Effect("500lb_air", ed3, true, true)
+
+        sound.Play("ambient/explosions/explode_8.wav", bpos, 145, math.random(85, 95),  1.0)
+        sound.Play("ambient/explosions/explode_4.wav", bpos, 140, math.random(90, 105), 0.9)
+        util.BlastDamage(game.GetWorld(), game.GetWorld(), bpos, 350, 180)
+    end
+
+    -- Explosion 1: immediate, at crash point
+    BigBlast(pos)
+
+    -- Explosions 2-4: staggered cook-off along the falling body
+    local delays  = { 0.9, 1.9, 3.1 }
+    local offsets = {
+        Vector( 280,   0,   0),   -- nose
+        Vector(-300,   0,  60),   -- tail
+        Vector(   0, 150, -40),   -- wing root
+    }
+    for i, delay in ipairs(delays) do
+        local off = offsets[i]
+        timer.Simple(delay, function()
+            local ent = Entity(entIdx)
+            local bpos
+            if IsValid(ent) and not ent:IsMarkedForDeletion() then
+                bpos = ent:GetPos()
+                    + ent:GetAngles():Forward() * off.x
+                    + ent:GetAngles():Right()   * off.y
+                    + ent:GetAngles():Up()      * off.z
+            else
+                bpos = pos + Vector(0, 0, -300 * delay)
+            end
+            BigBlast(bpos)
+        end)
+    end
+
+    timer.Simple(0, function()
+        local ent = Entity(entIdx)
+        if IsValid(ent) then ent:Remove() end
+    end)
+end
+
+-- ============================================================
+-- DESTROY
+-- ============================================================
 function ENT:DestroyPlane()
     if self.IsDestroyed then return end
     self.IsDestroyed = true
-    self.Destroyed   = true   -- tells PhysicsUpdate / Think to stop flying
 
-    -- Stop all audio immediately
     if self.IdleLoop         then self.IdleLoop:Stop()         self.IdleLoop         = nil end
     if self.PlaneAmbientLoop then self.PlaneAmbientLoop:Stop() self.PlaneAmbientLoop = nil end
     self:StopSprayLoop()
     self:BroadcastDamageTier(0)
 
-    -- Hand physics to gravity so the plane tumbles and falls
-    local phys = self:GetPhysicsObject()
-    if IsValid(phys) then
-        phys:EnableGravity(true)
-        phys:Wake()
-        -- Forward momentum carries it; angular velocity gives the tumble
-        local fwd = self:GetForward()
-        phys:SetVelocity(fwd * 280 + Vector(0, 0, -60))
-        phys:SetAngleVelocity(Vector(
-            math.Rand(8,  18),   -- pitch down
-            math.Rand(-6,  6),   -- yaw wobble
-            math.Rand(15, 30)    -- roll — main tumble axis
-        ))
-    end
+    self:StartTumble()
 
+    -- Safety net: if somehow it never hits ground, remove after 20s
     local entIdx = self:EntIndex()
-    local origin = self.LastPos or self:GetPos()
-
-    -- Helper: fire one big explosion at 'pos'
-    local function BigBlast(pos)
-        local ed1 = EffectData()
-        ed1:SetOrigin(pos) ed1:SetScale(7) ed1:SetMagnitude(7) ed1:SetRadius(700)
-        util.Effect("HelicopterMegaBomb", ed1, true, true)
-
-        local ed2 = EffectData()
-        ed2:SetOrigin(pos + Vector(0,0,90)) ed2:SetScale(6) ed2:SetMagnitude(6) ed2:SetRadius(600)
-        util.Effect("500lb_air", ed2, true, true)
-
-        local ed3 = EffectData()
-        ed3:SetOrigin(pos + Vector(0,0,200)) ed3:SetScale(5) ed3:SetMagnitude(5) ed3:SetRadius(500)
-        util.Effect("500lb_air", ed3, true, true)
-
-        sound.Play("ambient/explosions/explode_8.wav",  pos, 145, math.random(85, 95),  1.0)
-        sound.Play("ambient/explosions/explode_4.wav",  pos, 140, math.random(90, 105), 0.9)
-        util.BlastDamage(Entity(entIdx) or game.GetWorld(), game.GetWorld(), pos, 350, 180)
-    end
-
-    -- Explosion 1 — immediate, at current position
-    BigBlast(origin)
-
-    -- Explosions 2-4 — staggered, tracked along the falling body
-    local delays = { 0.9, 1.9, 3.1 }
-    -- Spread offsets across the fuselage so they look like different sections cooking off
-    local offsets = {
-        Vector( 280,   0,   0),   -- nose section
-        Vector(-300,   0,  60),   -- tail section
-        Vector(   0, 150, -40),   -- port wing root
-    }
-
-    for i, delay in ipairs(delays) do
-        local off = offsets[i]
-        timer.Simple(delay, function()
-            local ent = Entity(entIdx)
-            local blastPos
-            if IsValid(ent) and not ent:IsMarkedForDeletion() then
-                blastPos = ent:GetPos() + ent:GetAngles():Forward() * off.x
-                                       + ent:GetAngles():Right()   * off.y
-                                       + ent:GetAngles():Up()      * off.z
-            else
-                -- Plane already gone; approximate position by drifting origin
-                blastPos = origin + Vector(0, 0, -400 * delay)
-            end
-            BigBlast(blastPos)
-        end)
-    end
-
-    -- Remove the entity after the last explosion has had time to render
-    timer.Simple(5.0, function()
+    timer.Simple(20, function()
         local ent = Entity(entIdx)
         if IsValid(ent) and not ent:IsMarkedForDeletion() then
-            ent:Remove()
+            ent:CrashExplode()
         end
     end)
 end
 
+-- ============================================================
+-- THINK
+-- ============================================================
 function ENT:Think()
     if not self.DieTime or not self.SpawnTime then self:NextThink(CurTime() + 0.1) return true end
     local ct = CurTime()
 
-    -- During tumble: kill engine sound once, then do nothing else
-    if self.Destroyed then
-        if not self._EngineKilled then
-            self._EngineKilled = true
-            if self.IdleLoop         then self.IdleLoop:Stop()         self.IdleLoop         = nil end
-            if self.PlaneAmbientLoop then self.PlaneAmbientLoop:Stop() self.PlaneAmbientLoop = nil end
+    -- Tumbling: run the manual tumble loop every tick, skip everything else
+    if self.IsTumbling then
+        if not self.TumbleCrashed then
+            self:UpdateTumble(ct)
         end
-        self:NextThink(ct + 0.5)
+        self:NextThink(ct + 0.015)
         return true
     end
 
@@ -424,8 +509,8 @@ function ENT:Think()
 end
 
 function ENT:PhysicsUpdate(phys)
-    -- Once destroyed, let gravity + the tumble angular velocity do their job
-    if self.Destroyed then return end
+    -- Tumbling is driven entirely by Think/UpdateTumble; block PhysicsUpdate.
+    if self.IsTumbling or self.IsDestroyed then return end
 
     if not self.DieTime or not self.sky then return end
     if CurTime() >= self.DieTime then self:Remove() return end
@@ -453,6 +538,8 @@ function ENT:PhysicsUpdate(phys)
     local currentYaw  = self.ang.y
     local rawYawDelta = math.NormalizeAngle(currentYaw - (self.PrevYaw or currentYaw))
     self.PrevYaw      = currentYaw
+    -- Keep flightYaw in sync so tumble inherits correct direction
+    self.flightYaw    = currentYaw
     local targetRoll  = math.Clamp(rawYawDelta * -18, -15, 15)
     local rollLerp    = rawYawDelta ~= 0 and 0.08 or 0.04
     self.SmoothedRoll = Lerp(rollLerp, self.SmoothedRoll, targetRoll)
