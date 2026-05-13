@@ -166,8 +166,6 @@ ENT.MuzzleForwardOffset  = 250
 ENT.MuzzleSideOffset     = -60
 
 -- GAU muzzle: same system as 40mm.
--- Furthest-back position on the model (rearmost of the old 3-point table).
--- Negative forward = toward the tail; negative right = port (left) side.
 ENT.GAU_MuzzleForwardOffset = -300
 ENT.GAU_MuzzleSideOffset    = -250
 ENT.GAU_MuzzleUpOffset      = 50
@@ -266,6 +264,7 @@ function ENT:Initialize()
     self.GAU_SweepStartPos  = nil
     self.GAU_SweepEndPos    = nil
     self.IsDestroyed        = false
+    self.Destroyed          = false   -- tumble flag (mirrors C-17 convention)
     self.DamageTier         = 0
     self.JASSM_DeployCount  = 0
     self.JASSM_Stock        = JASSM_MAX_STOCK
@@ -310,27 +309,110 @@ function ENT:OnTakeDamage(dmginfo)
     if hp <= 0 then self:Debug("Shot down!") self:DestroyPlane() end
 end
 
+-- -----------------------------------------------------------------------
+-- DestroyPlane  —  slow tumble + 4 staggered real explosions
+-- -----------------------------------------------------------------------
 function ENT:DestroyPlane()
     if self.IsDestroyed then return end
     self.IsDestroyed = true
+    self.Destroyed   = true   -- tells PhysicsUpdate / Think to stop flying
+
+    -- Stop all audio immediately
     if self.IdleLoop         then self.IdleLoop:Stop()         self.IdleLoop         = nil end
     if self.PlaneAmbientLoop then self.PlaneAmbientLoop:Stop() self.PlaneAmbientLoop = nil end
     self:StopSprayLoop()
     self:BroadcastDamageTier(0)
-    local pos = self.LastPos or self:GetPos()
-    local ed1 = EffectData() ed1:SetOrigin(pos) ed1:SetScale(6) ed1:SetMagnitude(6) ed1:SetRadius(600) util.Effect("HelicopterMegaBomb", ed1, true, true)
-    local ed2 = EffectData() ed2:SetOrigin(pos) ed2:SetScale(5) ed2:SetMagnitude(5) ed2:SetRadius(500) util.Effect("500lb_air", ed2, true, true)
-    local ed3 = EffectData() ed3:SetOrigin(pos + Vector(0,0,80)) ed3:SetScale(4) ed3:SetMagnitude(4) ed3:SetRadius(400) util.Effect("500lb_air", ed3, true, true)
-    local ed4 = EffectData() ed4:SetOrigin(pos + Vector(0,0,180)) ed4:SetScale(3) ed4:SetMagnitude(3) ed4:SetRadius(300) util.Effect("500lb_air", ed4, true, true)
-    sound.Play("ambient/explosions/explode_8.wav", pos, 140, 90,  1.0)
-    sound.Play("weapon_AWP.Single",               pos, 145, 60,  1.0)
-    util.BlastDamage(self, self, pos, 400, 200)
-    self:Remove()
+
+    -- Hand physics to gravity so the plane tumbles and falls
+    local phys = self:GetPhysicsObject()
+    if IsValid(phys) then
+        phys:EnableGravity(true)
+        phys:Wake()
+        -- Forward momentum carries it; angular velocity gives the tumble
+        local fwd = self:GetForward()
+        phys:SetVelocity(fwd * 280 + Vector(0, 0, -60))
+        phys:SetAngleVelocity(Vector(
+            math.Rand(8,  18),   -- pitch down
+            math.Rand(-6,  6),   -- yaw wobble
+            math.Rand(15, 30)    -- roll — main tumble axis
+        ))
+    end
+
+    local entIdx = self:EntIndex()
+    local origin = self.LastPos or self:GetPos()
+
+    -- Helper: fire one big explosion at 'pos'
+    local function BigBlast(pos)
+        local ed1 = EffectData()
+        ed1:SetOrigin(pos) ed1:SetScale(7) ed1:SetMagnitude(7) ed1:SetRadius(700)
+        util.Effect("HelicopterMegaBomb", ed1, true, true)
+
+        local ed2 = EffectData()
+        ed2:SetOrigin(pos + Vector(0,0,90)) ed2:SetScale(6) ed2:SetMagnitude(6) ed2:SetRadius(600)
+        util.Effect("500lb_air", ed2, true, true)
+
+        local ed3 = EffectData()
+        ed3:SetOrigin(pos + Vector(0,0,200)) ed3:SetScale(5) ed3:SetMagnitude(5) ed3:SetRadius(500)
+        util.Effect("500lb_air", ed3, true, true)
+
+        sound.Play("ambient/explosions/explode_8.wav",  pos, 145, math.random(85, 95),  1.0)
+        sound.Play("ambient/explosions/explode_4.wav",  pos, 140, math.random(90, 105), 0.9)
+        util.BlastDamage(Entity(entIdx) or game.GetWorld(), game.GetWorld(), pos, 350, 180)
+    end
+
+    -- Explosion 1 — immediate, at current position
+    BigBlast(origin)
+
+    -- Explosions 2-4 — staggered, tracked along the falling body
+    local delays = { 0.9, 1.9, 3.1 }
+    -- Spread offsets across the fuselage so they look like different sections cooking off
+    local offsets = {
+        Vector( 280,   0,   0),   -- nose section
+        Vector(-300,   0,  60),   -- tail section
+        Vector(   0, 150, -40),   -- port wing root
+    }
+
+    for i, delay in ipairs(delays) do
+        local off = offsets[i]
+        timer.Simple(delay, function()
+            local ent = Entity(entIdx)
+            local blastPos
+            if IsValid(ent) and not ent:IsMarkedForDeletion() then
+                blastPos = ent:GetPos() + ent:GetAngles():Forward() * off.x
+                                       + ent:GetAngles():Right()   * off.y
+                                       + ent:GetAngles():Up()      * off.z
+            else
+                -- Plane already gone; approximate position by drifting origin
+                blastPos = origin + Vector(0, 0, -400 * delay)
+            end
+            BigBlast(blastPos)
+        end)
+    end
+
+    -- Remove the entity after the last explosion has had time to render
+    timer.Simple(5.0, function()
+        local ent = Entity(entIdx)
+        if IsValid(ent) and not ent:IsMarkedForDeletion() then
+            ent:Remove()
+        end
+    end)
 end
 
 function ENT:Think()
     if not self.DieTime or not self.SpawnTime then self:NextThink(CurTime() + 0.1) return true end
     local ct = CurTime()
+
+    -- During tumble: kill engine sound once, then do nothing else
+    if self.Destroyed then
+        if not self._EngineKilled then
+            self._EngineKilled = true
+            if self.IdleLoop         then self.IdleLoop:Stop()         self.IdleLoop         = nil end
+            if self.PlaneAmbientLoop then self.PlaneAmbientLoop:Stop() self.PlaneAmbientLoop = nil end
+        end
+        self:NextThink(ct + 0.5)
+        return true
+    end
+
     if ct >= self.DieTime then self:Remove() return end
     if not IsValid(self.PhysObj) then self.PhysObj = self:GetPhysicsObject() end
     if IsValid(self.PhysObj) and self.PhysObj:IsAsleep() then self.PhysObj:Wake() end
@@ -342,6 +424,9 @@ function ENT:Think()
 end
 
 function ENT:PhysicsUpdate(phys)
+    -- Once destroyed, let gravity + the tumble angular velocity do their job
+    if self.Destroyed then return end
+
     if not self.DieTime or not self.sky then return end
     if CurTime() >= self.DieTime then self:Remove() return end
     local pos = self:GetPos()
@@ -501,8 +586,6 @@ function ENT:GetTargetGroundPos()
     return basePos + offsetDir * offsetDist
 end
 
--- GAU muzzle: forward/right/up offsets from plane center.
--- Z is NOT locked to sky so the up offset places it on the model correctly.
 function ENT:GetGAUMuzzlePos()
     local pos   = self:GetPos()
     local ang   = self:GetAngles()
@@ -512,7 +595,6 @@ function ENT:GetGAUMuzzlePos()
         + ang:Up()      * self.GAU_MuzzleUpOffset
 end
 
--- 40mm muzzle: same system, Z locked to sky altitude.
 function ENT:GetMuzzlePos()
     local pos     = self:GetPos()
     local ang     = self:GetAngles()
