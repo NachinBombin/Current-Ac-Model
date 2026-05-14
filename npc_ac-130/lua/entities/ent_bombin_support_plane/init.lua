@@ -541,12 +541,20 @@ function ENT:DestroyPlane()
 
     self:StartTumble()
 
-    -- Safety net: spawned over void or stuck, never hit ground
+    -- Safety net: plane spawned over void or got stuck and never hit ground.
+    -- The class check is CRITICAL: after CrashExplode removes this entity (at t+3.5s),
+    -- the engine may recycle the same EntIndex for a completely different entity.
+    -- Without the class guard, ent:CrashExplode() at t+20s would call a nil method
+    -- on that recycled entity, producing the "attempt to call method 'CrashExplode'
+    -- (a nil value)" error at line 550.
     local entIdx = self:EntIndex()
     timer.Simple(20, function()
         local ent = Entity(entIdx)
-        -- Only fire if entity still exists AND CrashExplode hasn't run yet
-        if IsValid(ent) and not ent:IsMarkedForDeletion() and not ent._CrashFired then
+        if IsValid(ent)
+            and not ent:IsMarkedForDeletion()
+            and ent:GetClass() == "ent_bombin_support_plane"
+            and not ent._CrashFired
+        then
             ent:CrashExplode()
         end
     end)
