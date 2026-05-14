@@ -34,6 +34,11 @@ local JASSM_MAX_STOCK = 6
 
 local TUMBLE_GRAVITY = 600
 
+-- JASSM drop safety constants (mirrored from C-17)
+local JASSM_MIN_FREEFALL_CLEARANCE = 800
+local JASSM_SHA_FLOOR              = 400
+local JASSM_MIN_DROP_HEIGHT        = JASSM_SHA_FLOOR * 1.25 + JASSM_MIN_FREEFALL_CLEARANCE
+
 util.AddNetworkString("bombin_plane_damage_tier")
 util.AddNetworkString("bombin_plane_spatial_sound")
 util.AddNetworkString("bombin_105mm_direct_sound")
@@ -699,6 +704,7 @@ function ENT:ArmWeapon(weapon, ct)
         self.GAU_SweepStartPos = targetPos - sweepDir * self.GAU_SweepHalfLength
         self.GAU_SweepEndPos   = targetPos + sweepDir * self.GAU_SweepHalfLength
     elseif self.CurrentWeapon == "jassm" then
+        -- Reset per-salvo shot counter; JASSM_DeployCount tracks lifetime total separately
         self.JASSM_SalvoFired = 0
     end
 end
@@ -986,60 +992,111 @@ function ENT:Update105mm(ct)
     )
 end
 
-function ENT:SpawnOneJASSM(deployIdx)
+-- ============================================================
+-- W1: JASSM
+-- Mirrors the C-17's SpawnOneJASSM safety architecture:
+--   1. dropIndex is 0-based per-salvo (not a lifetime counter)
+--   2. Altitude guard: abort if drop height < JASSM_MIN_DROP_HEIGHT
+--   3. SkyHeightAdd computed with freefall clearance, matching C-17 formula
+--   4. NoCollide hold on spawn to prevent self-intersection ignition
+-- ============================================================
+function ENT:SpawnOneJASSM(dropIndex)
+    dropIndex = dropIndex or 0
+
     if not scripted_ents.GetStored("ent_bombin_jassm_owned") then
         self:Debug("JASSM: ent_bombin_jassm_owned not registered, skipping") return false
     end
     if (self.JASSM_Stock or 0) <= 0 then self:Debug("JASSM: bay empty") return false end
-    local maxDeploys = math.floor(self.SkyHeightAdd / self.JASSM_AltOffset)
-    local clampedIdx = math.min(deployIdx, maxDeploys)
-    local jassmAlt   = self.sky - (clampedIdx * self.JASSM_AltOffset)
-    local tailWorld  = self:LocalToWorld(self.JASSM_TailOffset)
-    local spawnPos   = Vector(tailWorld.x, tailWorld.y, jassmAlt)
-    if not util.IsInWorld(spawnPos) then spawnPos = Vector(self.CenterPos.x, self.CenterPos.y, jassmAlt) end
-    local callDir = self:GetForward() callDir.z = 0
-    if callDir:LengthSqr() < 0.01 then callDir = Vector(1,0,0) end
+
+    -- Build drop position: tail attachment point, stacked downward by AltOffset per index
+    local tailWorld = self:LocalToWorld(self.JASSM_TailOffset)
+    local dropPos   = Vector(tailWorld.x, tailWorld.y, tailWorld.z - (dropIndex * self.JASSM_AltOffset))
+    if not util.IsInWorld(dropPos) then
+        dropPos = Vector(self.CenterPos.x, self.CenterPos.y, self:GetPos().z - (dropIndex * self.JASSM_AltOffset))
+    end
+
+    -- Altitude safety guard: refuse to drop if too close to the ground
+    local groundZ    = self:FindGround(dropPos)
+    if groundZ == -1 then groundZ = self.CenterPos.z end
+    local dropHeight = math.max(dropPos.z - groundZ, 0)
+    if dropHeight < JASSM_MIN_DROP_HEIGHT then
+        self:Debug("JASSM: altitude too low (" .. math.Round(dropHeight) .. "u), aborting drop #" .. (dropIndex + 1))
+        return false
+    end
+
+    -- SkyHeightAdd: freefall clearance budget, floored at SHA_FLOOR (mirrors C-17)
+    local shaMax = (dropHeight - JASSM_MIN_FREEFALL_CLEARANCE) / 1.25
+    local sha    = math.max(shaMax, JASSM_SHA_FLOOR)
+
+    local callDir = self:GetForward()
+    callDir.z = 0
+    if callDir:LengthSqr() < 0.01 then callDir = Vector(1, 0, 0) end
     callDir:Normalize()
+
     local jassm = ents.Create("ent_bombin_jassm_owned")
     if not IsValid(jassm) then self:Debug("JASSM: ents.Create failed") return false end
-    jassm:SetPos(spawnPos) jassm:SetAngles(callDir:Angle())
+
+    jassm:SetPos(dropPos)
+    jassm:SetAngles(callDir:Angle())
     jassm.SpawnedFromPlane = true
-    jassm.CenterPos    = self.CenterPos
-    jassm.CallDir      = callDir
-    jassm.Lifetime     = math.min(self.Lifetime, 35)
-    jassm.Speed        = 250
-    jassm.OrbitRadius  = self.OrbitRadius * 0.75
-    jassm.SkyHeightAdd = math.max(jassmAlt - (self.sky - self.SkyHeightAdd), 800)
-    jassm:Spawn() jassm:Activate()
+    jassm.CenterPos        = self.CenterPos
+    jassm.CallDir          = callDir
+    jassm.Lifetime         = math.min(self.Lifetime, 35)
+    jassm.Speed            = 250
+    jassm.OrbitRadius      = self.OrbitRadius * 0.75
+    jassm.SkyHeightAdd     = sha
+    jassm:SetOwner(self)
+    jassm.IsOnPlane        = true
+    jassm.Launcher         = self
+
+    jassm:Spawn()
+    jassm:Activate()
+
+    if not IsValid(jassm) then return false end
+
+    -- NoCollide hold: prevents the missile clipping the fuselage on release
+    local mHandle = constraint.NoCollide(jassm, self, 0, 0)
+    timer.Simple(1.25, function()
+        if IsValid(mHandle) then mHandle:Remove() end
+    end)
+
     self.JASSM_Stock       = self.JASSM_Stock - 1
     self.JASSM_DeployCount = self.JASSM_DeployCount + 1
     self:SetNWInt("JASSM_Spent", JASSM_MAX_STOCK - self.JASSM_Stock)
-    self:Debug(string.format("JASSM #%d deployed alt=%.0f stock=%d", self.JASSM_DeployCount, jassmAlt, self.JASSM_Stock))
+    self:Debug(string.format("JASSM drop #%d SHA=%.0f stock=%d", self.JASSM_DeployCount, sha, self.JASSM_Stock))
     return true
 end
 
 function ENT:UpdateJASSM(ct)
+    -- One salvo per weapon window; JASSM_SalvoFired is reset in ArmWeapon
     if self.JASSM_SalvoFired >= 1 then return end
     if self.JASSM_Stock <= 0 then self.JASSM_SalvoFired = 1 return end
+
     self.JASSM_SalvoFired = 1
+
     local tripleRoll = math.random() < 0.20
     local salvoCount = tripleRoll and math.min(3, self.JASSM_Stock) or 1
     self:Debug(string.format("JASSM window: salvo=%d triple=%s stock=%d", salvoCount, tostring(tripleRoll), self.JASSM_Stock))
-    local baseCount = self.JASSM_DeployCount
-    local entIdx    = self:EntIndex()
-    self:SpawnOneJASSM(baseCount + 1)
+
+    local entIdx = self:EntIndex()
+
+    -- dropIndex is 0-based and per-salvo, NOT a lifetime deploy counter.
+    -- This ensures correct altitude stacking (0 * AltOffset, 1 * AltOffset, 2 * AltOffset).
+    self:SpawnOneJASSM(0)
+
     if salvoCount >= 2 then
         timer.Simple(1.0, function()
             local p = Entity(entIdx)
             if not IsValid(p) or p:IsMarkedForDeletion() or p.JASSM_Stock <= 0 then return end
-            p:SpawnOneJASSM(baseCount + 2)
+            p:SpawnOneJASSM(1)
         end)
     end
+
     if salvoCount >= 3 then
         timer.Simple(2.0, function()
             local p = Entity(entIdx)
             if not IsValid(p) or p:IsMarkedForDeletion() or p.JASSM_Stock <= 0 then return end
-            p:SpawnOneJASSM(baseCount + 3)
+            p:SpawnOneJASSM(2)
         end)
     end
 end
