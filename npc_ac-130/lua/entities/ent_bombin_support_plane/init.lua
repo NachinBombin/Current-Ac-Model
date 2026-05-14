@@ -32,7 +32,6 @@ local PEACEFUL_MAX = 7
 
 local JASSM_MAX_STOCK = 6
 
--- Tumble gravity constant (units/s^2), same as C-17.
 local TUMBLE_GRAVITY = 600
 
 util.AddNetworkString("bombin_plane_damage_tier")
@@ -222,7 +221,6 @@ function ENT:Initialize()
     self:SetAngles(Angle(0, ang.y - 90, 0))
     self.ang = self:GetAngles()
 
-    -- Store the current flight yaw so tumble can inherit it
     self.flightYaw = ang.y - 90
 
     self.AltDriftCurrent  = self.sky
@@ -275,11 +273,11 @@ function ENT:Initialize()
     self.IsPeaceful         = false
     self.PeacefulUntil      = 0
 
-    -- Tumble state (mirrors C-17)
     self.IsTumbling        = false
     self.TumbleLastTime    = 0
     self.TumbleGroundZ     = ground
     self.TumbleCrashed     = false
+    self._CrashFired       = false
     self.TumbleVelocity    = Vector(0, 0, 0)
     self.TumbleAngVelocity = Vector(0, 0, 0)
 
@@ -321,29 +319,27 @@ function ENT:OnTakeDamage(dmginfo)
 end
 
 -- ============================================================
--- TUMBLE  (exact C-17 system)
+-- TUMBLE
 -- ============================================================
 function ENT:StartTumble()
-    self.IsTumbling    = true
+    self.IsTumbling     = true
     self.TumbleLastTime = CurTime()
-    self.TumbleCrashed = false
+    self.TumbleCrashed  = false
 
     local gnd = self:FindGround(self:GetPos())
     if gnd ~= -1 then self.TumbleGroundZ = gnd end
 
-    -- Inherit current flight velocity + push nose down
     local fwd = Angle(0, self.flightYaw or self.ang.y, 0):Forward()
     local spd = self.Speed or 300
     self.TumbleVelocity = Vector(fwd.x * spd, fwd.y * spd, -80)
 
     local function sign() return (math.random(2) == 1) and 1 or -1 end
     self.TumbleAngVelocity = Vector(
-        math.Rand(8,  18) * sign(),   -- pitch
-        math.Rand(3,   8) * sign(),   -- yaw wobble
-        math.Rand(20, 40) * sign()    -- roll (main axis)
+        math.Rand(8,  18) * sign(),
+        math.Rand(3,   8) * sign(),
+        math.Rand(20, 40) * sign()
     )
 
-    -- Take full position control away from PhysicsUpdate
     self:SetMoveType(MOVETYPE_NONE)
     local phys = self:GetPhysicsObject()
     if IsValid(phys) then
@@ -353,7 +349,6 @@ function ENT:StartTumble()
         phys:Sleep()
     end
 
-    -- Initial damage explosion
     local pos = self:GetPos()
     local ed  = EffectData()
     ed:SetOrigin(pos) ed:SetScale(4) ed:SetMagnitude(4) ed:SetRadius(400)
@@ -362,19 +357,18 @@ function ENT:StartTumble()
 end
 
 function ENT:UpdateTumble(ct)
+    if not IsValid(self) then return end
     if not self.IsTumbling or self.TumbleCrashed then return end
 
     local dt = ct - self.TumbleLastTime
     self.TumbleLastTime = ct
     if dt <= 0 or dt > 0.2 then return end
 
-    -- Apply gravity to Z velocity
     self.TumbleVelocity.z = self.TumbleVelocity.z - TUMBLE_GRAVITY * dt
 
     local pos    = self:GetPos()
     local newPos = pos + self.TumbleVelocity * dt
 
-    -- Advance angles
     local av = self.TumbleAngVelocity
     self.ang = Angle(
         self.ang.p + av.x * dt,
@@ -382,7 +376,6 @@ function ENT:UpdateTumble(ct)
         self.ang.r + av.z * dt
     )
 
-    -- Ground / wall hit check
     local hitGround = newPos.z <= (self.TumbleGroundZ or -16384) + 200
     local hitWall   = false
     if not hitGround then
@@ -391,6 +384,8 @@ function ENT:UpdateTumble(ct)
     end
 
     if hitGround or hitWall then
+        -- Set flag BEFORE calling so any re-entrant path is blocked
+        self.TumbleCrashed = true
         self:CrashExplode()
         return
     end
@@ -400,13 +395,14 @@ function ENT:UpdateTumble(ct)
 end
 
 function ENT:CrashExplode()
-    if self.TumbleCrashed then return end
+    -- Idempotency: only ever run once per entity lifetime
+    if self._CrashFired then return end
+    self._CrashFired   = true
     self.TumbleCrashed = true
 
-    local pos = Vector(self:GetPos())
+    local pos    = Vector(self:GetPos())
     local entIdx = self:EntIndex()
 
-    -- Helper: one big explosion burst (same as what BigBlast was doing)
     local function BigBlast(bpos)
         local ed1 = EffectData()
         ed1:SetOrigin(bpos) ed1:SetScale(7) ed1:SetMagnitude(7) ed1:SetRadius(700)
@@ -425,15 +421,13 @@ function ENT:CrashExplode()
         util.BlastDamage(game.GetWorld(), game.GetWorld(), bpos, 350, 180)
     end
 
-    -- Explosion 1: immediate, at crash point
     BigBlast(pos)
 
-    -- Explosions 2-4: staggered cook-off along the falling body
     local delays  = { 0.9, 1.9, 3.1 }
     local offsets = {
-        Vector( 280,   0,   0),   -- nose
-        Vector(-300,   0,  60),   -- tail
-        Vector(   0, 150, -40),   -- wing root
+        Vector( 280,   0,   0),
+        Vector(-300,   0,  60),
+        Vector(   0, 150, -40),
     }
     for i, delay in ipairs(delays) do
         local off = offsets[i]
@@ -452,7 +446,8 @@ function ENT:CrashExplode()
         end)
     end
 
-    timer.Simple(0, function()
+    -- Remove after the last cook-off blast has fired
+    timer.Simple(3.5, function()
         local ent = Entity(entIdx)
         if IsValid(ent) then ent:Remove() end
     end)
@@ -472,11 +467,12 @@ function ENT:DestroyPlane()
 
     self:StartTumble()
 
-    -- Safety net: if somehow it never hits ground, remove after 20s
+    -- Safety net: spawned over void or stuck, never hit ground
     local entIdx = self:EntIndex()
     timer.Simple(20, function()
         local ent = Entity(entIdx)
-        if IsValid(ent) and not ent:IsMarkedForDeletion() then
+        -- Only fire if entity still exists AND CrashExplode hasn't run yet
+        if IsValid(ent) and not ent:IsMarkedForDeletion() and not ent._CrashFired then
             ent:CrashExplode()
         end
     end)
@@ -489,7 +485,6 @@ function ENT:Think()
     if not self.DieTime or not self.SpawnTime then self:NextThink(CurTime() + 0.1) return true end
     local ct = CurTime()
 
-    -- Tumbling: run the manual tumble loop every tick, skip everything else
     if self.IsTumbling then
         if not self.TumbleCrashed then
             self:UpdateTumble(ct)
@@ -509,7 +504,6 @@ function ENT:Think()
 end
 
 function ENT:PhysicsUpdate(phys)
-    -- Tumbling is driven entirely by Think/UpdateTumble; block PhysicsUpdate.
     if self.IsTumbling or self.IsDestroyed then return end
 
     if not self.DieTime or not self.sky then return end
@@ -538,7 +532,6 @@ function ENT:PhysicsUpdate(phys)
     local currentYaw  = self.ang.y
     local rawYawDelta = math.NormalizeAngle(currentYaw - (self.PrevYaw or currentYaw))
     self.PrevYaw      = currentYaw
-    -- Keep flightYaw in sync so tumble inherits correct direction
     self.flightYaw    = currentYaw
     local targetRoll  = math.Clamp(rawYawDelta * -18, -15, 15)
     local rollLerp    = rawYawDelta ~= 0 and 0.08 or 0.04
