@@ -394,6 +394,77 @@ function ENT:UpdateTumble(ct)
     self:SetAngles(self.ang)
 end
 
+-- ============================================================
+-- GIB SPAWNER
+-- Each gib is staggered 0.1s apart to avoid a bulk-spawn lag spike.
+-- Ignite is deferred one tick (timer.Simple(0)) after Activate so
+-- the entity fire system is fully ready -- this is the reliable pattern.
+-- ============================================================
+local GIB_MODELS = {
+    "models/fonv/vehicles/b29/parts/b29_partwing.mdl",
+    "models/fonv/vehicles/b29/parts/b29_partwing.mdl",
+    "models/fonv/vehicles/b29/parts/b29_partnose.mdl",
+    "models/fonv/vehicles/b29/parts/b29_partprop.mdl",
+    "models/fonv/vehicles/b29/parts/b29_partprop.mdl",
+    "models/fonv/vehicles/b29/parts/b29_partprop.mdl",
+    "models/fonv/vehicles/b29/parts/b29_parttube.mdl",
+}
+
+local GIB_LIFETIME = 40
+
+local function SpawnGibs(origin)
+    for idx, mdl in ipairs(GIB_MODELS) do
+        timer.Simple((idx - 1) * 0.1, function()
+            local gib = ents.Create("prop_physics")
+            if not IsValid(gib) then return end
+
+            local pos = origin + Vector(
+                math.Rand(-150, 150),
+                math.Rand(-150, 150),
+                math.Rand(  20, 100)
+            )
+            if not util.IsInWorld(pos) then pos = origin end
+
+            gib:SetModel(mdl)
+            gib:SetPos(pos)
+            gib:SetAngles(Angle(math.Rand(0, 360), math.Rand(0, 360), math.Rand(0, 360)))
+            gib:SetCollisionGroup(COLLISION_GROUP_DEBRIS)
+            gib:Spawn()
+            gib:Activate()
+
+            local phys = gib:GetPhysicsObject()
+            if IsValid(phys) then
+                phys:SetMass(2000)
+                phys:SetDragCoefficient(0)
+                phys:SetAngleDragCoefficient(0)
+                phys:EnableGravity(true)
+                phys:Wake()
+                phys:ApplyForceCenter(Vector(
+                    math.Rand(-400, 400),
+                    math.Rand(-400, 400),
+                    math.Rand( 300, 900)
+                ) * 2000)
+                phys:ApplyTorqueCenter(Vector(
+                    math.Rand(-2000, 2000),
+                    math.Rand(-2000, 2000),
+                    math.Rand(-2000, 2000)
+                ))
+            end
+
+            -- Defer Ignite one tick so the entity fire system is ready
+            timer.Simple(0, function()
+                if IsValid(gib) then
+                    gib:Ignite(GIB_LIFETIME, 0)
+                end
+            end)
+
+            timer.Simple(GIB_LIFETIME, function()
+                if IsValid(gib) then gib:Remove() end
+            end)
+        end)
+    end
+end
+
 function ENT:CrashExplode()
     -- Idempotency: only ever run once per entity lifetime
     if self._CrashFired then return end
@@ -422,6 +493,9 @@ function ENT:CrashExplode()
     end
 
     BigBlast(pos)
+
+    -- Spawn gibs at crash origin
+    SpawnGibs(pos)
 
     local delays  = { 0.9, 1.9, 3.1 }
     local offsets = {
