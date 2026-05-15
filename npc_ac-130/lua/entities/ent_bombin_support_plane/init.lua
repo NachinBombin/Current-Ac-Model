@@ -53,9 +53,11 @@ local EVASION_BLEND   = 0.12
 local CLEAR_TIME      = 2.5
 local PROBE_MASK      = MASK_SOLID_BRUSHONLY
 
--- Normal orbit turn rate (deg/tick, negative = left in Source)
-local ORBIT_YAW_RATE  = -0.1
-local SKY_YAW_RATE    = -0.3
+-- Normal orbit turn rate (deg/tick).
+-- POSITIVE = left for this model (air_130_l.mdl forward is NOT +X,
+-- so the Source yaw convention is effectively inverted relative to the model).
+local ORBIT_YAW_RATE  = 0.1
+local SKY_YAW_RATE    = 0.3
 
 util.AddNetworkString("bombin_plane_damage_tier")
 util.AddNetworkString("bombin_plane_spatial_sound")
@@ -235,15 +237,9 @@ function ENT:Initialize()
 
     self:SetModel("models/military2/air/air_130_l.mdl")
 
-    -- SOLID_VPHYSICS + MOVETYPE_VPHYSICS so PhysicsUpdate fires every tick
-    -- and bullet/hitscan traces land on the collision hull.
-    -- Collision group 0 (default) is mandatory: other groups cause bullet
-    -- traces to skip this entity, making it invulnerable.
-    -- Velocity is zeroed every tick so the engine never resolves impulses;
-    -- all movement is driven manually via phys:SetPos().
-    self:PhysicsInit(SOLID_VPHYSICS)   -- also sets solid type internally
+    self:PhysicsInit(SOLID_VPHYSICS)
     self:SetMoveType(MOVETYPE_VPHYSICS)
-    self:SetCollisionGroup(0)          -- 0 = COLLISION_GROUP_NONE
+    self:SetCollisionGroup(0)
     self:SetPos(spawnPos)
     self.LastPos = spawnPos
 
@@ -251,8 +247,6 @@ function ENT:Initialize()
     self:SetNWInt("MaxHP", self.MaxHP)
 
     local ang = self.CallDir:Angle()
-    -- Store initial yaw normalized into [-180, 180] so self.ang.y is always
-    -- in that range from the very first tick.
     local initYaw = math.NormalizeAngle(ang.y - 90)
     self:SetAngles(Angle(0, initYaw, 0))
     self.ang = self:GetAngles()
@@ -384,18 +378,14 @@ function ENT:UpdateEvasion()
         self.EvasionClearT = 0
 
         if not self.IsEvading then
-            -- Always seed EvasionYaw from the normalized current yaw so the
-            -- initial delta is zero and blending starts from the correct side.
             self.EvasionYaw   = math.NormalizeAngle(self.ang.y)
             self.IsEvading    = true
             self.EvasionPitch = 0
             self:Debug("Evasion started")
         end
 
-        -- Always turn left: subtract nudge (negative yaw = left in Source).
-        -- Normalize after each nudge so EvasionYaw stays in [-180, 180]
-        -- and the delta computed below never crosses the ±180 wrap boundary.
-        self.EvasionYaw = math.NormalizeAngle(self.EvasionYaw - YAW_NUDGE)
+        -- Always turn left: ADD nudge (positive yaw = left for this model).
+        self.EvasionYaw = math.NormalizeAngle(self.EvasionYaw + YAW_NUDGE)
 
         if hitDown and not hitUp then
             self.EvasionPitch = self.EvasionPitch - PITCH_NUDGE
@@ -441,10 +431,6 @@ end
 
 function ENT:OnTakeDamage(dmginfo)
     if self.IsDestroyed then return end
-
-    -- Block ONLY pure physics-engine crush (spawn-overlap pop).
-    -- All weapon damage carries additional type flags alongside DMG_CRUSH,
-    -- so those pass through correctly.
     if dmginfo:GetDamageType() == DMG_CRUSH then return end
 
     local hp = self:GetNWInt("HP", self.MaxHP or 8000)
@@ -721,8 +707,6 @@ function ENT:PhysicsUpdate(phys)
     if not self.DieTime or not self.sky then return end
     if CurTime() >= self.DieTime then self:Remove() return end
 
-    -- Zero engine velocity every tick so the solver never resolves impulses;
-    -- all movement is manual via phys:SetPos().
     phys:SetVelocity(Vector(0,0,0))
     phys:SetAngleVelocity(Vector(0,0,0))
 
@@ -741,30 +725,27 @@ function ENT:PhysicsUpdate(phys)
 
     -- ----------------------------------------------------------------
     -- Yaw accumulation
-    -- IMPORTANT: self.ang.y is our authoritative yaw tracker.
-    -- It must stay normalized in [-180, 180] at all times.
-    -- If it is ever allowed to drift past ±180 (e.g. after thousands of
-    -- ticks of -0.1 deg/tick accumulation), math.NormalizeAngle returns
-    -- the wrong sign and evasion blending steers the wrong way.
+    -- self.ang.y is normalized to [-180, 180] every tick.
+    -- ORBIT_YAW_RATE and SKY_YAW_RATE are POSITIVE = left for this
+    -- model (air_130_l.mdl), because the model's forward axis is NOT
+    -- +X — the Source yaw convention is effectively flipped.
     -- ----------------------------------------------------------------
     local evasionPitchCorrection = self:UpdateEvasion()
 
     if self.IsEvading then
-        -- Both EvasionYaw and self.ang.y are normalized, so delta is always
-        -- a small angle in [-180, 180] with the correct sign.
-        -- EvasionYaw < self.ang.y  →  delta negative  →  ang.y decreases = left.
+        -- EvasionYaw was nudged positive (left). delta > 0 means target
+        -- is left of current heading, so ang.y increases = correct.
         local delta = math.NormalizeAngle(self.EvasionYaw - self.ang.y)
         self.ang = self.ang + Angle(0, delta * EVASION_BLEND, 0)
     else
         -- Normal orbit: always apply a continuous left-turn rate every tick.
-        -- ORBIT_YAW_RATE is negative = left in Source.
         local orbitYaw   = ORBIT_YAW_RATE
         local flatPos    = Vector(pos.x, pos.y, 0)
         local flatCenter = Vector(self.CenterPos.x, self.CenterPos.y, 0)
         local dist       = flatPos:Distance(flatCenter)
-        -- If drifted too far out, add an extra left nudge to tighten the orbit.
+        -- Drifted too far out — tighten the orbit with an extra left nudge.
         if dist > self.OrbitRadius * 1.15 then
-            orbitYaw = orbitYaw - 0.05
+            orbitYaw = orbitYaw + 0.05
         end
 
         -- Skybox ahead: turn left harder
@@ -775,10 +756,7 @@ function ENT:PhysicsUpdate(phys)
         self.ang = self.ang + Angle(0, orbitYaw + skyYaw, 0)
     end
 
-    -- Normalize self.ang.y every tick so it never drifts outside [-180, 180].
-    -- This is the critical fix: without this, after ~1800 ticks of -0.1/tick
-    -- the yaw reaches -180 and wraps to large positive values, corrupting
-    -- every subsequent NormalizeAngle delta calculation.
+    -- Normalize self.ang.y every tick.
     self.ang = Angle(self.ang.p, math.NormalizeAngle(self.ang.y), self.ang.r)
 
     -- Roll / pitch cosmetics
@@ -817,7 +795,8 @@ function ENT:PhysicsUpdate(phys)
             self.IsEvading    = true
             self.EvasionPitch = 0
         end
-        self.EvasionYaw = math.NormalizeAngle(self.EvasionYaw - YAW_NUDGE * 4)
+        -- Nudge left (positive for this model)
+        self.EvasionYaw = math.NormalizeAngle(self.EvasionYaw + YAW_NUDGE * 4)
         phys:SetPos(pos)
         return
     end
