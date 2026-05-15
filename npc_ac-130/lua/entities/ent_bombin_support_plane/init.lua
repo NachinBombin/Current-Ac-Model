@@ -183,6 +183,62 @@ ENT.JASSM_TailOffset = Vector(-420, 0, 0)
 ENT.MaxHP = 8000
 ENT.DamageTierThresholds = { 0.75, 0.50, 0.25 }
 
+-- ============================================================
+-- EVASION TUNING  (cargo-plane scale — deliberately very slow)
+-- All distances are in Source units (1 unit ≈ 1.9 cm).
+-- Turn rates are in radians/s of yaw bias accumulated per eval;
+-- after dt-normalised decay they yield only ~0.5–2 °/s of actual
+-- heading change — appropriate for a 40-metre aircraft.
+-- ============================================================
+
+-- Sky probe distances: large envelope so the plane "sees" the
+-- sky wall well before it would reach it at cruise speed.
+local SKY_PROBE_DIST_H   = 8000   -- horizontal look-ahead (vs 1400 on drone)
+local SKY_PROBE_DIST_V   = 5000   -- vertical look-ahead   (vs 900 on drone)
+-- How much yaw bias each sky-hit adds.  This is intentionally tiny;
+-- the plane accumulates slowly and decays slowly.
+local SKY_YAW_BIAS_RATE  = 0.018  -- rad/s equiv added per eval (drone: 0.35)
+local SKY_ALT_PUSH       = 60     -- units pushed into AltDriftTarget on sky-up hit
+local SKY_ALT_RISE       = 40     -- units pushed down on sky-down hit
+
+-- Per-tick multiplicative decay — expressed as "fraction surviving
+-- per reference tick (66 Hz)".  Using the (decay ^ (dt * tickRef))
+-- pattern makes decay tick-rate-independent, fixing the Lancet bug.
+local SKY_YAW_BIAS_DECAY = 0.992  -- very slow bleed-off (drone: 0.88 per raw tick)
+local SKY_TICK_REF       = 66
+
+-- Obstacle probe geometry
+local OBS_DIST_FWD     = 6000   -- forward look-ahead (drone: 900)
+local OBS_DIST_SIDE    = 5000   -- side look-ahead   (drone: 700)
+local OBS_DIST_UP      = 3500   -- up                (drone: 500)
+local OBS_DIST_DOWN    = 2000   -- down              (drone: 300)
+
+-- Yaw bias added per obstacle hit — small to keep the plane
+-- turning like a supertanker, not a UAV.
+local OBS_YAW_RATE     = 0.022  -- rad/s equiv per eval (drone: 0.55)
+local OBS_ALT_PUSH_UP  = 80     -- alt push upward
+local OBS_ALT_PUSH_DN  = 25     -- alt push downward
+
+-- Decay constants (same dt-normalised pattern)
+local OBS_YAW_DECAY    = 0.994
+local OBS_ALT_DECAY    = 0.996
+local OBS_TICK_REF     = 66
+
+-- Rate-limit: evaluate probes at most every OBS_EVAL_RATE seconds
+local OBS_EVAL_RATE    = 0.08   -- 12.5 Hz (drone: 20 Hz — we can afford lower for big plane)
+-- Fraction of probe length considered "near" (doubles urgency)
+local OBS_NEAR_FRAC    = 0.30
+-- How many consecutive hit-frames before escalation
+local OBS_ESCALATE_MAX = 8      -- drone: 4; big plane is slow so needs more patience
+
+local OBS_TRACE_MASK   = MASK_SOLID_BRUSHONLY
+
+-- Max clamped bias values.  These caps prevent runaway accumulation
+-- from a single tight passage.
+local SKY_YAW_BIAS_MAX = 0.06   -- radians (drone: 1.8 -- we want ~3% of that)
+local OBS_YAW_BIAS_MAX = 0.08
+local OBS_ALT_BIAS_MAX = 300
+
 function ENT:Initialize()
     self.CenterPos    = self:GetVar("CenterPos", self:GetPos())
     self.CallDir      = self:GetVar("CallDir", Vector(1, 0, 0))
@@ -289,6 +345,23 @@ function ENT:Initialize()
     self:SetNWInt("JASSM_Spent", 0)
     self:SetNWInt("JASSM_Max",   JASSM_MAX_STOCK)
 
+    -- ----------------------------------------------------------------
+    -- EVASION STATE
+    -- ----------------------------------------------------------------
+    -- OrbitDir drives which way we steer to escape — same concept as
+    -- the Lancet but the plane only has one direction at a time.
+    self.OrbitDir      = (math.random(0, 1) == 0) and 1 or -1
+
+    -- Accumulated bias values; decayed every PhysicsUpdate tick.
+    self.SkyYawBias    = 0
+    self.ObsYawBias    = 0
+    self.ObsAltBias    = 0
+
+    -- Probe rate-limiter
+    self.ObsLastEval   = 0
+    -- Consecutive hit counter for escalation
+    self.ObsConsecHits = 0
+
     if not HasGred() then self:Debug("WARNING: Gred base not found; falling back to rpg_missile.") end
 end
 
@@ -389,7 +462,6 @@ function ENT:UpdateTumble(ct)
     end
 
     if hitGround or hitWall then
-        -- Set flag BEFORE calling so any re-entrant path is blocked
         self.TumbleCrashed = true
         self:CrashExplode()
         return
@@ -401,9 +473,6 @@ end
 
 -- ============================================================
 -- GIB SPAWNER
--- Each gib is staggered 0.1s apart to avoid a bulk-spawn lag spike.
--- Ignite is deferred one tick (timer.Simple(0)) after Activate so
--- the entity fire system is fully ready -- this is the reliable pattern.
 -- ============================================================
 local GIB_MODELS = {
     "models/fonv/vehicles/b29/parts/b29_partwing.mdl",
@@ -456,7 +525,6 @@ local function SpawnGibs(origin)
                 ))
             end
 
-            -- Defer Ignite one tick so the entity fire system is ready
             timer.Simple(0, function()
                 if IsValid(gib) then
                     gib:Ignite(GIB_LIFETIME, 0)
@@ -471,7 +539,6 @@ local function SpawnGibs(origin)
 end
 
 function ENT:CrashExplode()
-    -- Idempotency: only ever run once per entity lifetime
     if self._CrashFired then return end
     self._CrashFired   = true
     self.TumbleCrashed = true
@@ -498,8 +565,6 @@ function ENT:CrashExplode()
     end
 
     BigBlast(pos)
-
-    -- Spawn gibs at crash origin
     SpawnGibs(pos)
 
     local delays  = { 0.9, 1.9, 3.1 }
@@ -525,7 +590,6 @@ function ENT:CrashExplode()
         end)
     end
 
-    -- Remove after the last cook-off blast has fired
     timer.Simple(3.5, function()
         local ent = Entity(entIdx)
         if IsValid(ent) then ent:Remove() end
@@ -546,12 +610,6 @@ function ENT:DestroyPlane()
 
     self:StartTumble()
 
-    -- Safety net: plane spawned over void or got stuck and never hit ground.
-    -- The class check is CRITICAL: after CrashExplode removes this entity (at t+3.5s),
-    -- the engine may recycle the same EntIndex for a completely different entity.
-    -- Without the class guard, ent:CrashExplode() at t+20s would call a nil method
-    -- on that recycled entity, producing the "attempt to call method 'CrashExplode'
-    -- (a nil value)" error at line 550.
     local entIdx = self:EntIndex()
     timer.Simple(20, function()
         local ent = Entity(entIdx)
@@ -563,6 +621,108 @@ function ENT:DestroyPlane()
             ent:CrashExplode()
         end
     end)
+end
+
+-- ============================================================
+-- EVASION PROBES
+-- Two independent probe sets, both rate-limited to OBS_EVAL_RATE.
+-- Biases decay every PhysicsUpdate using a dt-normalised exponent
+-- so the decay rate is identical at any server tick rate.
+-- ============================================================
+
+function ENT:EvaluateSkyProbes(pos, flatFwd)
+    local flatRight = Vector(-flatFwd.y, flatFwd.x, 0)
+
+    local probes = {
+        { dir = flatFwd,                                              dist = SKY_PROBE_DIST_H, role = "fwd"   },
+        { dir = (flatFwd + flatRight * 0.6):GetNormalized(),          dist = SKY_PROBE_DIST_H, role = "right" },
+        { dir = (flatFwd - flatRight * 0.6):GetNormalized(),          dist = SKY_PROBE_DIST_H, role = "left"  },
+        { dir = Vector(flatFwd.x, flatFwd.y,  0.8):GetNormalized(),   dist = SKY_PROBE_DIST_V, role = "up"    },
+        { dir = Vector(flatFwd.x, flatFwd.y, -0.4):GetNormalized(),   dist = SKY_PROBE_DIST_V, role = "down"  },
+    }
+
+    local yawBias = 0
+    local altPush = 0
+
+    for _, p in ipairs(probes) do
+        local tr = util.QuickTrace(pos, p.dir * p.dist, self)
+        if not tr.HitSky then continue end
+
+        if     p.role == "fwd"   then yawBias = yawBias + SKY_YAW_BIAS_RATE * 2.0 * self.OrbitDir
+        elseif p.role == "right" then yawBias = yawBias - SKY_YAW_BIAS_RATE
+        elseif p.role == "left"  then yawBias = yawBias + SKY_YAW_BIAS_RATE
+        elseif p.role == "up"    then altPush = altPush - SKY_ALT_PUSH
+        elseif p.role == "down"  then altPush = altPush + SKY_ALT_RISE
+        end
+    end
+
+    return yawBias, altPush
+end
+
+function ENT:EvaluateObstacleProbes(pos, flatFwd)
+    local flatRight = Vector(-flatFwd.y, flatFwd.x, 0)
+
+    local probes = {
+        { dir = flatFwd,                                                     dist = OBS_DIST_FWD,       role = "fwd"      },
+        { dir = flatFwd,                                                     dist = OBS_DIST_FWD * 0.35, role = "fwd_near" },
+        { dir = (flatFwd + flatRight * 0.55):GetNormalized(),                dist = OBS_DIST_SIDE,      role = "right"    },
+        { dir = (flatFwd - flatRight * 0.55):GetNormalized(),                dist = OBS_DIST_SIDE,      role = "left"     },
+        { dir = Vector(flatFwd.x, flatFwd.y,  0.4):GetNormalized(),          dist = OBS_DIST_UP,        role = "up_fwd"   },
+        { dir = Vector(flatFwd.x, flatFwd.y, -0.3):GetNormalized(),          dist = OBS_DIST_DOWN,      role = "down_fwd" },
+    }
+
+    local yawBias = 0
+    local altPush = 0
+    local anyHit  = false
+
+    for _, p in ipairs(probes) do
+        local tr = util.TraceLine({
+            start  = pos,
+            endpos = pos + p.dir * p.dist,
+            filter = self,
+            mask   = OBS_TRACE_MASK,
+        })
+
+        if not tr.Hit or tr.HitSky then continue end
+
+        anyHit = true
+        local urgency = (tr.Fraction < OBS_NEAR_FRAC) and 2.0 or 1.0
+
+        if p.role == "fwd" then
+            yawBias = yawBias + OBS_YAW_RATE * urgency * self.OrbitDir
+            altPush = altPush + OBS_ALT_PUSH_UP * urgency
+        elseif p.role == "fwd_near" then
+            -- Near hit: higher urgency multiplier, same orbit-direction steer
+            yawBias = yawBias + OBS_YAW_RATE * urgency * 1.5 * self.OrbitDir
+            altPush = altPush + OBS_ALT_PUSH_UP * urgency * 1.5
+        elseif p.role == "right" then
+            yawBias = yawBias - OBS_YAW_RATE * urgency
+        elseif p.role == "left" then
+            yawBias = yawBias + OBS_YAW_RATE * urgency
+        elseif p.role == "up_fwd" then
+            altPush = altPush - OBS_ALT_PUSH_DN * urgency
+            yawBias = yawBias + OBS_YAW_RATE * 0.4 * urgency * self.OrbitDir
+        elseif p.role == "down_fwd" then
+            altPush = altPush + OBS_ALT_PUSH_UP * 0.5 * urgency
+        end
+    end
+
+    if anyHit then
+        self.ObsConsecHits = (self.ObsConsecHits or 0) + 1
+        if self.ObsConsecHits >= OBS_ESCALATE_MAX then
+            -- The aircraft has been pressing against geometry for a long time;
+            -- reverse orbit direction for a slow wide loop away.
+            self.OrbitDir      = -self.OrbitDir
+            -- Give a larger one-shot bias in the new direction.
+            yawBias            = yawBias + OBS_YAW_RATE * 5.0 * self.OrbitDir
+            self.ObsConsecHits = 0
+            self:Debug("Obstacle escalation — orbit direction reversed")
+        end
+    else
+        self.ObsConsecHits = math.max(0, (self.ObsConsecHits or 0) - 1)
+    end
+
+    return yawBias, altPush
 end
 
 -- ============================================================
@@ -590,13 +750,22 @@ function ENT:Think()
     return true
 end
 
+-- ============================================================
+-- FLIGHT  (PhysicsUpdate — runs every physics tick)
+-- ============================================================
 function ENT:PhysicsUpdate(phys)
     if self.IsTumbling or self.IsDestroyed then return end
 
     if not self.DieTime or not self.sky then return end
     if CurTime() >= self.DieTime then self:Remove() return end
+
     local pos = self:GetPos()
+    local dt  = FrameTime()
+    if dt <= 0 then dt = 0.015 end
+
     self.LastPos = pos
+
+    -- Altitude drift target picker
     if CurTime() >= self.AltDriftNextPick then
         self.AltDriftTarget   = self.sky + math.Rand(-self.AltDriftRange, self.AltDriftRange)
         self.AltDriftNextPick = CurTime() + math.Rand(12, 30)
@@ -605,34 +774,107 @@ function ENT:PhysicsUpdate(phys)
     self.JitterPhase = self.JitterPhase + 0.02
     local jitter     = math.sin(self.JitterPhase) * self.JitterAmplitude
     local liveAlt    = self.AltDriftCurrent + jitter
+
+    -- ---- Evasion evaluation (rate-limited) ----
+    local flatFwd = Angle(0, self.ang.y, 0):Forward()
+    flatFwd.z = 0
+    if flatFwd:LengthSqr() < 0.01 then flatFwd = Vector(1, 0, 0) end
+    flatFwd:Normalize()
+
+    local ct = CurTime()
+    if ct - self.ObsLastEval >= OBS_EVAL_RATE then
+        self.ObsLastEval = ct
+
+        local skyYaw, skyAlt = self:EvaluateSkyProbes(pos, flatFwd)
+        local obsYaw, obsAlt = self:EvaluateObstacleProbes(pos, flatFwd)
+
+        self.SkyYawBias = self.SkyYawBias + skyYaw
+        self.ObsYawBias = self.ObsYawBias + obsYaw
+        self.ObsAltBias = self.ObsAltBias + obsAlt
+
+        -- Apply altitude correction from evasion directly into drift target,
+        -- clamped so the plane stays within a sane altitude band.
+        local totalAlt = skyAlt + obsAlt
+        if totalAlt ~= 0 then
+            self.AltDriftTarget = math.Clamp(
+                self.AltDriftTarget + totalAlt,
+                self.sky - self.AltDriftRange * 3,
+                self.sky + self.AltDriftRange * 0.5
+            )
+            -- Accelerate the lerp briefly when evading
+            self.AltDriftCurrent = Lerp(self.AltDriftLerp * 8, self.AltDriftCurrent, self.AltDriftTarget)
+        end
+    end
+
+    -- ---- Dt-normalised bias decay ----
+    -- Using  bias * decay^(dt * tickRef)  means the half-life is
+    -- identical at 33 Hz or 128 Hz server tick rates.
+    local skyDecay = SKY_YAW_BIAS_DECAY ^ (dt * SKY_TICK_REF)
+    local obsDecay = OBS_YAW_DECAY      ^ (dt * OBS_TICK_REF)
+    local altDecay = OBS_ALT_DECAY      ^ (dt * OBS_TICK_REF)
+
+    self.SkyYawBias = math.Clamp(self.SkyYawBias * skyDecay, -SKY_YAW_BIAS_MAX, SKY_YAW_BIAS_MAX)
+    self.ObsYawBias = math.Clamp(self.ObsYawBias * obsDecay, -OBS_YAW_BIAS_MAX, OBS_YAW_BIAS_MAX)
+    self.ObsAltBias = math.Clamp(self.ObsAltBias * altDecay, -OBS_ALT_BIAS_MAX, OBS_ALT_BIAS_MAX)
+
+    -- ---- Orbit yaw (basic) ----
+    -- Original logic: turn inward when drifting beyond OrbitRadius.
+    -- We keep this as a gentle restoring force and ADD the evasion biases.
     local flatPos    = Vector(pos.x, pos.y, 0)
     local flatCenter = Vector(self.CenterPos.x, self.CenterPos.y, 0)
     local dist       = flatPos:Distance(flatCenter)
-    local orbitYaw = 0
-    if dist > self.OrbitRadius and (self.TurnDelay or 0) < CurTime() then
-        orbitYaw = 0.1 self.TurnDelay = CurTime() + 0.02
+    local orbitYaw   = 0
+    if dist > self.OrbitRadius and (self.TurnDelay or 0) < ct then
+        orbitYaw = 0.06 * self.OrbitDir   -- was 0.1 hardcoded, now direction-aware
+        self.TurnDelay = ct + 0.02
     end
-    local trSkyCheck = util.QuickTrace(self:GetPos(), self:GetForward() * 3000, self)
-    local skyYaw = 0
-    if trSkyCheck.HitSky then skyYaw = 0.3 end
-    self.ang = self.ang + Angle(0, orbitYaw + skyYaw, 0)
+
+    -- Total heading delta this tick: orbit restore + evasion biases
+    local totalYawDelta = (orbitYaw + self.SkyYawBias + self.ObsYawBias) * dt
+    self.ang = self.ang + Angle(0, math.deg(totalYawDelta), 0)
+
+    -- ---- Roll and pitch cosmetics ----
     local currentYaw  = self.ang.y
     local rawYawDelta = math.NormalizeAngle(currentYaw - (self.PrevYaw or currentYaw))
     self.PrevYaw      = currentYaw
     self.flightYaw    = currentYaw
+
+    -- Gentle bank on turns (max ±15° — a fully-loaded cargo plane)
     local targetRoll  = math.Clamp(rawYawDelta * -18, -15, 15)
     local rollLerp    = rawYawDelta ~= 0 and 0.08 or 0.04
     self.SmoothedRoll = Lerp(rollLerp, self.SmoothedRoll, targetRoll)
+
     local forward     = self.ang:Forward()
     local vel         = forward * self.Speed
     local targetPitch = math.Clamp(-vel.z * 0.02, -8, 8)
     self.SmoothedPitch = Lerp(0.03, self.SmoothedPitch, targetPitch)
+
     local finalAng = Angle(self.SmoothedPitch, self.ang.y, self.SmoothedRoll)
     phys:SetAngles(finalAng)
-    phys:SetPos(Vector(pos.x + vel.x * engine.TickInterval(),
-                       pos.y + vel.y * engine.TickInterval(),
-                       liveAlt))
+    phys:SetPos(Vector(
+        pos.x + vel.x * engine.TickInterval(),
+        pos.y + vel.y * engine.TickInterval(),
+        liveAlt
+    ))
     phys:SetVelocity(vel)
+
+    -- ---- Out-of-world safety net ----
+    -- The plane NEVER despawns from hitting geometry or sky limits.
+    -- Instead it is silently teleported back to a safe orbit position
+    -- and the evasion biases are reset so it starts fresh.
+    if not self:IsInWorld() then
+        self:Debug("Out of world — emergency orbit recovery (no despawn)")
+        local safePos = Vector(self.CenterPos.x, self.CenterPos.y, self.sky)
+        self:SetPos(safePos)
+        phys:SetVelocity(Vector(0, 0, 0))
+        -- Reset biases: the teleport puts us in open space, old biases are stale.
+        self.SkyYawBias    = 0
+        self.ObsYawBias    = 0
+        self.ObsAltBias    = 0
+        self.ObsConsecHits = 0
+        -- Reverse orbit direction as a courtesy so we don't immediately fly back in.
+        self.OrbitDir      = -self.OrbitDir
+    end
 end
 
 function ENT:HandleWeaponWindow(ct)
@@ -704,7 +946,6 @@ function ENT:ArmWeapon(weapon, ct)
         self.GAU_SweepStartPos = targetPos - sweepDir * self.GAU_SweepHalfLength
         self.GAU_SweepEndPos   = targetPos + sweepDir * self.GAU_SweepHalfLength
     elseif self.CurrentWeapon == "jassm" then
-        -- Reset per-salvo shot counter; JASSM_DeployCount tracks lifetime total separately
         self.JASSM_SalvoFired = 0
     end
 end
@@ -994,11 +1235,6 @@ end
 
 -- ============================================================
 -- W1: JASSM
--- Mirrors the C-17's SpawnOneJASSM safety architecture:
---   1. dropIndex is 0-based per-salvo (not a lifetime counter)
---   2. Altitude guard: abort if drop height < JASSM_MIN_DROP_HEIGHT
---   3. SkyHeightAdd computed with freefall clearance, matching C-17 formula
---   4. NoCollide hold on spawn to prevent self-intersection ignition
 -- ============================================================
 function ENT:SpawnOneJASSM(dropIndex)
     dropIndex = dropIndex or 0
@@ -1008,14 +1244,12 @@ function ENT:SpawnOneJASSM(dropIndex)
     end
     if (self.JASSM_Stock or 0) <= 0 then self:Debug("JASSM: bay empty") return false end
 
-    -- Build drop position: tail attachment point, stacked downward by AltOffset per index
     local tailWorld = self:LocalToWorld(self.JASSM_TailOffset)
     local dropPos   = Vector(tailWorld.x, tailWorld.y, tailWorld.z - (dropIndex * self.JASSM_AltOffset))
     if not util.IsInWorld(dropPos) then
         dropPos = Vector(self.CenterPos.x, self.CenterPos.y, self:GetPos().z - (dropIndex * self.JASSM_AltOffset))
     end
 
-    -- Altitude safety guard: refuse to drop if too close to the ground
     local groundZ    = self:FindGround(dropPos)
     if groundZ == -1 then groundZ = self.CenterPos.z end
     local dropHeight = math.max(dropPos.z - groundZ, 0)
@@ -1024,7 +1258,6 @@ function ENT:SpawnOneJASSM(dropIndex)
         return false
     end
 
-    -- SkyHeightAdd: freefall clearance budget, floored at SHA_FLOOR (mirrors C-17)
     local shaMax = (dropHeight - JASSM_MIN_FREEFALL_CLEARANCE) / 1.25
     local sha    = math.max(shaMax, JASSM_SHA_FLOOR)
 
@@ -1054,7 +1287,6 @@ function ENT:SpawnOneJASSM(dropIndex)
 
     if not IsValid(jassm) then return false end
 
-    -- NoCollide hold: prevents the missile clipping the fuselage on release
     local mHandle = constraint.NoCollide(jassm, self, 0, 0)
     timer.Simple(1.25, function()
         if IsValid(mHandle) then mHandle:Remove() end
@@ -1068,7 +1300,6 @@ function ENT:SpawnOneJASSM(dropIndex)
 end
 
 function ENT:UpdateJASSM(ct)
-    -- One salvo per weapon window; JASSM_SalvoFired is reset in ArmWeapon
     if self.JASSM_SalvoFired >= 1 then return end
     if self.JASSM_Stock <= 0 then self.JASSM_SalvoFired = 1 return end
 
@@ -1080,8 +1311,6 @@ function ENT:UpdateJASSM(ct)
 
     local entIdx = self:EntIndex()
 
-    -- dropIndex is 0-based and per-salvo, NOT a lifetime deploy counter.
-    -- This ensures correct altitude stacking (0 * AltOffset, 1 * AltOffset, 2 * AltOffset).
     self:SpawnOneJASSM(0)
 
     if salvoCount >= 2 then
