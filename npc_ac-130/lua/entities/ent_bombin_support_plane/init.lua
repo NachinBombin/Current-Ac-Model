@@ -47,11 +47,15 @@ local PROBE_DIAG      = 2400
 local PROBE_SIDE      = 1600
 local PROBE_UP        = 900
 local PROBE_DOWN      = 700
-local YAW_NUDGE       = 0.9
+local YAW_NUDGE       = 0.9    -- deg/tick; always subtracted (left turn)
 local PITCH_NUDGE     = 0.12
 local EVASION_BLEND   = 0.12
 local CLEAR_TIME      = 2.5
 local PROBE_MASK      = MASK_SOLID_BRUSHONLY
+
+-- Normal orbit turn rate (deg/tick, negative = left in Source)
+local ORBIT_YAW_RATE  = -0.1   -- left turn
+local SKY_YAW_RATE    = -0.3   -- left turn when skybox ahead
 
 util.AddNetworkString("bombin_plane_damage_tier")
 util.AddNetworkString("bombin_plane_spatial_sound")
@@ -231,17 +235,17 @@ function ENT:Initialize()
 
     self:SetModel("models/military2/air/air_130_l.mdl")
 
-    -- SOLID_VPHYSICS so bullets/traces can hit the entity (OnTakeDamage fires).
-    -- MOVETYPE_VPHYSICS so PhysicsUpdate fires every tick.
-    -- We zero the physics velocity every PhysicsUpdate tick so the engine
-    -- never actually moves the entity via its own solver; we do it ourselves
-    -- with phys:SetPos().  This keeps damage working while preventing
-    -- collision-crush despawns because the engine never sees a non-zero
-    -- velocity to resolve against a wall.
+    -- SOLID_VPHYSICS + MOVETYPE_VPHYSICS: PhysicsUpdate fires every tick AND
+    -- bullets/traces hit the collision hull so OnTakeDamage receives damage.
+    -- COLLISION_GROUP_NONE (default) is mandatory: any other group (e.g.
+    -- COLLISION_GROUP_IN_VEHICLE) causes bullet traces to skip this entity,
+    -- making it invulnerable to hitscan and physical projectiles.
+    -- We zero velocity every PhysicsUpdate tick so the engine never resolves
+    -- a real collision impulse; position is driven entirely by phys:SetPos().
     self:PhysicsInit(SOLID_VPHYSICS)
     self:SetMoveType(MOVETYPE_VPHYSICS)
     self:SetSolid(SOLID_VPHYSICS)
-    self:SetCollisionGroup(COLLISION_GROUP_IN_VEHICLE)
+    self:SetCollisionGroup(COLLISION_GROUP_NONE)  -- must be NONE for damage to work
     self:SetPos(spawnPos)
     self.LastPos = spawnPos
 
@@ -266,18 +270,18 @@ function ENT:Initialize()
     self.SmoothedPitch   = 0
     self.PrevYaw         = self:GetAngles().y
 
+    -- Evasion always turns left (negative yaw delta in Source convention)
     self.IsEvading     = false
     self.EvasionYaw    = self.flightYaw
     self.EvasionPitch  = 0
     self.EvasionClearT = 0
-    self.EvasionSign   = -1   -- always turn left
 
     self.PhysObj = self:GetPhysicsObject()
     if IsValid(self.PhysObj) then
         self.PhysObj:Wake()
         self.PhysObj:EnableGravity(false)
-        self.PhysObj:SetMass(1e8)       -- huge mass: collision impulses cause negligible movement
-        self.PhysObj:SetDamping(1, 1)   -- kill any residual angular/linear drift
+        self.PhysObj:SetMass(1e8)
+        self.PhysObj:SetDamping(1, 1)
     end
 
     self.IdleLoop = CreateSound(self, "ac-130_kill_sounds/AC130_idle_inside.mp3")
@@ -349,37 +353,31 @@ function ENT:RunObstacleProbes()
         { pos - up    * PROBE_DOWN,    "down"      },
     }
 
-    local hitLeft  = false
-    local hitRight = false
     local hitUp    = false
     local hitDown  = false
     local anyHit   = false
 
     for _, probe in ipairs(probes) do
-        local endpos = probe[1]
-        local label  = probe[2]
         local tr = util.TraceLine({
             start  = pos,
-            endpos = endpos,
+            endpos = probe[1],
             filter = self,
             mask   = PROBE_MASK,
         })
         if tr.Hit then
             anyHit = true
-            if label == "fwd-left"  or label == "left"  then hitLeft  = true end
-            if label == "fwd-right" or label == "right" then hitRight = true end
-            if label == "up"                            then hitUp    = true end
-            if label == "down"                          then hitDown  = true end
+            if probe[2] == "up"   then hitUp   = true end
+            if probe[2] == "down" then hitDown  = true end
         end
     end
 
-    return anyHit, hitLeft, hitRight, hitUp, hitDown
+    return anyHit, hitUp, hitDown
 end
 
 function ENT:UpdateEvasion()
     if self.IsTumbling or self.IsDestroyed then return 0 end
 
-    local anyHit, hitLeft, hitRight, hitUp, hitDown = self:RunObstacleProbes()
+    local anyHit, hitUp, hitDown = self:RunObstacleProbes()
     local ct = CurTime()
 
     if anyHit then
@@ -387,13 +385,13 @@ function ENT:UpdateEvasion()
 
         if not self.IsEvading then
             self.EvasionYaw   = self.ang.y
-            self.EvasionSign  = -1
             self.IsEvading    = true
             self.EvasionPitch = 0
             self:Debug("Evasion started")
         end
 
-        self.EvasionYaw = self.EvasionYaw + YAW_NUDGE * self.EvasionSign
+        -- Always turn left: subtract nudge (negative yaw = left in Source)
+        self.EvasionYaw = self.EvasionYaw - YAW_NUDGE
 
         if hitDown and not hitUp then
             self.EvasionPitch = self.EvasionPitch - PITCH_NUDGE
@@ -440,18 +438,15 @@ end
 function ENT:OnTakeDamage(dmginfo)
     if self.IsDestroyed then return end
 
-    -- Only block pure physics-engine crush (e.g. when two props overlap at spawn).
-    -- We do NOT block DMG_CRUSH from weapons -- real weapon damage never arrives
-    -- as pure DMG_CRUSH; it always has DMG_BULLET/DMG_BLAST/etc. set as well.
-    -- Blocking ALL DMG_CRUSH (as the previous version did) swallowed bullet
-    -- damage from some weapons that tag their hits with DMG_CRUSH.
-    local dmgType = dmginfo:GetDamageType()
-    if dmgType == DMG_CRUSH then return end  -- pure physics crush only
+    -- Block ONLY pure physics-engine crush with no other damage type flags.
+    -- This is the spawn-overlap pop. All weapon damage (bullet, blast, etc.)
+    -- always has additional flags set alongside DMG_CRUSH, so it passes through.
+    if dmginfo:GetDamageType() == DMG_CRUSH then return end
 
     local hp = self:GetNWInt("HP", self.MaxHP or 8000)
     hp = hp - dmginfo:GetDamage()
     self:SetNWInt("HP", hp)
-    self:Debug("Hit! dmgtype=" .. tostring(dmgType) .. " dmg=" .. tostring(dmginfo:GetDamage()) .. " HP=" .. tostring(hp))
+    self:Debug("Hit! type=" .. tostring(dmginfo:GetDamageType()) .. " dmg=" .. tostring(dmginfo:GetDamage()) .. " HP=" .. tostring(hp))
     self:CheckDamageTier(hp)
     if hp <= 0 then self:Debug("Shot down!") self:DestroyPlane() end
 end
@@ -478,7 +473,6 @@ function ENT:StartTumble()
         math.Rand(20, 40) * sign()
     )
 
-    -- Freeze physics so the engine doesn't fight our manual tumble movement
     local phys = self:GetPhysicsObject()
     if IsValid(phys) then
         phys:EnableGravity(false)
@@ -527,7 +521,6 @@ function ENT:UpdateTumble(ct)
         return
     end
 
-    -- Move via phys:SetPos so it stays in sync with the physics object
     local phys = self:GetPhysicsObject()
     if IsValid(phys) then
         phys:SetPos(newPos)
@@ -717,8 +710,6 @@ end
 
 function ENT:PhysicsUpdate(phys)
     if self.IsTumbling or self.IsDestroyed then
-        -- During tumble: zeroing velocity is handled in UpdateTumble.
-        -- Just make sure the engine doesn't drift the entity.
         phys:SetVelocity(Vector(0,0,0))
         phys:SetAngleVelocity(Vector(0,0,0))
         return
@@ -726,10 +717,8 @@ function ENT:PhysicsUpdate(phys)
     if not self.DieTime or not self.sky then return end
     if CurTime() >= self.DieTime then self:Remove() return end
 
-    -- Zero physics velocity FIRST every tick.
-    -- This prevents the Source engine from resolving any collision impulse
-    -- (including skybox wall contacts) because from the engine's perspective
-    -- the object is always stationary between ticks.
+    -- Always zero engine velocity first so the physics solver never resolves
+    -- a collision impulse; all movement is driven manually via phys:SetPos().
     phys:SetVelocity(Vector(0,0,0))
     phys:SetAngleVelocity(Vector(0,0,0))
 
@@ -746,24 +735,29 @@ function ENT:PhysicsUpdate(phys)
     local jitter     = math.sin(self.JitterPhase) * self.JitterAmplitude
     local liveAlt    = self.AltDriftCurrent + jitter
 
-    -- Evasion + orbit yaw
+    -- Evasion / orbit yaw  (all turns are left = negative yaw in Source)
     local evasionPitchCorrection = self:UpdateEvasion()
 
     if self.IsEvading then
+        -- Blend current yaw toward evasion target (which is always decreasing = left)
         local delta = math.NormalizeAngle(self.EvasionYaw - self.ang.y)
         self.ang = self.ang + Angle(0, delta * EVASION_BLEND, 0)
     else
+        -- Normal orbit: always turn left
+        local orbitYaw = 0
         local flatPos    = Vector(pos.x, pos.y, 0)
         local flatCenter = Vector(self.CenterPos.x, self.CenterPos.y, 0)
         local dist       = flatPos:Distance(flatCenter)
-        local orbitYaw   = 0
         if dist > self.OrbitRadius and (self.TurnDelay or 0) < CurTime() then
-            orbitYaw = 0.1
+            orbitYaw = ORBIT_YAW_RATE   -- negative = left
             self.TurnDelay = CurTime() + 0.02
         end
+
+        -- Skybox ahead: turn left
         local skyYaw = 0
         local trSky  = util.QuickTrace(self:GetPos(), self:GetForward() * 3000, self)
-        if trSky.HitSky then skyYaw = 0.3 end
+        if trSky.HitSky then skyYaw = SKY_YAW_RATE end  -- negative = left
+
         self.ang = self.ang + Angle(0, orbitYaw + skyYaw, 0)
     end
 
@@ -796,16 +790,15 @@ function ENT:PhysicsUpdate(phys)
         liveAlt + vertCorrect * dt
     )
 
-    -- Position guard: never place the entity outside the world.
     if not util.IsInWorld(newPos) then
         self:Debug("Position guard: out-of-world move discarded")
         if not self.IsEvading then
             self.EvasionYaw   = self.ang.y
-            self.EvasionSign  = -1
             self.IsEvading    = true
             self.EvasionPitch = 0
         end
-        self.EvasionYaw = self.EvasionYaw + YAW_NUDGE * self.EvasionSign * 4
+        -- Force-nudge left hard
+        self.EvasionYaw = self.EvasionYaw - YAW_NUDGE * 4
         phys:SetPos(pos)
         return
     end
