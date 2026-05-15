@@ -183,71 +183,6 @@ ENT.JASSM_TailOffset = Vector(-420, 0, 0)
 ENT.MaxHP = 8000
 ENT.DamageTierThresholds = { 0.75, 0.50, 0.25 }
 
--- ============================================================
--- OBSTACLE EVASION CONSTANTS
--- EVADE_PROBE_DIST   : how far each horizontal ray looks ahead
--- EVADE_NUM_RAYS     : angular resolution of the sweep
--- EVADE_PUSH_GAIN    : repulsion weight per blocked ray
--- EVADE_TURN_RATE    : max evasion yaw rate in degrees/second
--- EVADE_SMOOTH       : lerp speed toward desired evasion rate
--- EVADE_INTERVAL     : seconds between full probe sweeps
--- ORBIT_TURN_RATE    : max orbit-correction yaw in degrees/second
---                      (slow, heavy-aircraft feel)
--- ============================================================
-local EVADE_PROBE_DIST  = 6000
-local EVADE_NUM_RAYS    = 8
-local EVADE_PUSH_GAIN   = 2.5
-local EVADE_TURN_RATE   = 6.0   -- deg/s max from evasion
-local EVADE_SMOOTH      = 0.04  -- low = very gradual banking
-local EVADE_INTERVAL    = 0.25
-
-local ORBIT_TURN_RATE   = 3.0   -- deg/s max for orbit correction (slow!)
-
--- ============================================================
--- ProbeObstacles
--- Casts EVADE_NUM_RAYS horizontal rays at flight altitude.
--- Accumulates a repulsion vector away from blocked directions.
--- Stores a desired signed yaw rate (deg/s) in EvadeYawRate.
--- ============================================================
-function ENT:ProbeObstacles()
-    local pos    = self:GetPos()
-    local skyZ   = self.sky or pos.z
-    local origin = Vector(pos.x, pos.y, skyZ)
-    local step   = 360 / EVADE_NUM_RAYS
-
-    local pushX, pushY = 0, 0
-
-    for i = 0, EVADE_NUM_RAYS - 1 do
-        local rad = math.rad(i * step)
-        local dir = Vector(math.cos(rad), math.sin(rad), 0)
-        local tr  = util.TraceLine({
-            start  = origin,
-            endpos = origin + dir * EVADE_PROBE_DIST,
-            filter = self,
-            mask   = MASK_SOLID_BRUSHONLY,
-        })
-
-        if tr.Hit and not tr.HitSky then
-            -- Closer hits push harder (fraction=0 is right next to us)
-            local weight = (1 - tr.Fraction) * EVADE_PUSH_GAIN
-            pushX = pushX - dir.x * weight
-            pushY = pushY - dir.y * weight
-        end
-    end
-
-    local pushLen = math.sqrt(pushX * pushX + pushY * pushY)
-    if pushLen > 0.01 then
-        -- Desired heading = direction of repulsion vector
-        local desiredYaw  = math.deg(math.atan2(pushY, pushX))
-        local currentYaw  = self.ang and self.ang.y or self:GetAngles().y
-        local delta       = math.NormalizeAngle(desiredYaw - currentYaw)
-        -- Convert angular gap into a desired yaw rate (deg/s), capped
-        self.EvadeYawRate = math.Clamp(delta * 0.4, -EVADE_TURN_RATE, EVADE_TURN_RATE)
-    else
-        self.EvadeYawRate = 0
-    end
-end
-
 function ENT:Initialize()
     self.CenterPos    = self:GetVar("CenterPos", self:GetPos())
     self.CallDir      = self:GetVar("CallDir", Vector(1, 0, 0))
@@ -304,11 +239,6 @@ function ENT:Initialize()
     self.SmoothedRoll    = 0
     self.SmoothedPitch   = 0
     self.PrevYaw         = self:GetAngles().y
-
-    -- Evasion state
-    self.EvadeYawRate       = 0   -- desired deg/s from obstacle probe
-    self.EvadeYawSmoothed   = 0   -- smoothed actual deg/s being applied
-    self.NextProbeTime      = CurTime() + EVADE_INTERVAL
 
     self.PhysObj = self:GetPhysicsObject()
     if IsValid(self.PhysObj) then
@@ -459,6 +389,7 @@ function ENT:UpdateTumble(ct)
     end
 
     if hitGround or hitWall then
+        -- Set flag BEFORE calling so any re-entrant path is blocked
         self.TumbleCrashed = true
         self:CrashExplode()
         return
@@ -470,6 +401,9 @@ end
 
 -- ============================================================
 -- GIB SPAWNER
+-- Each gib is staggered 0.1s apart to avoid a bulk-spawn lag spike.
+-- Ignite is deferred one tick (timer.Simple(0)) after Activate so
+-- the entity fire system is fully ready -- this is the reliable pattern.
 -- ============================================================
 local GIB_MODELS = {
     "models/fonv/vehicles/b29/parts/b29_partwing.mdl",
@@ -522,8 +456,11 @@ local function SpawnGibs(origin)
                 ))
             end
 
+            -- Defer Ignite one tick so the entity fire system is ready
             timer.Simple(0, function()
-                if IsValid(gib) then gib:Ignite(GIB_LIFETIME, 0) end
+                if IsValid(gib) then
+                    gib:Ignite(GIB_LIFETIME, 0)
+                end
             end)
 
             timer.Simple(GIB_LIFETIME, function()
@@ -534,6 +471,7 @@ local function SpawnGibs(origin)
 end
 
 function ENT:CrashExplode()
+    -- Idempotency: only ever run once per entity lifetime
     if self._CrashFired then return end
     self._CrashFired   = true
     self.TumbleCrashed = true
@@ -560,6 +498,8 @@ function ENT:CrashExplode()
     end
 
     BigBlast(pos)
+
+    -- Spawn gibs at crash origin
     SpawnGibs(pos)
 
     local delays  = { 0.9, 1.9, 3.1 }
@@ -585,6 +525,7 @@ function ENT:CrashExplode()
         end)
     end
 
+    -- Remove after the last cook-off blast has fired
     timer.Simple(3.5, function()
         local ent = Entity(entIdx)
         if IsValid(ent) then ent:Remove() end
@@ -605,6 +546,12 @@ function ENT:DestroyPlane()
 
     self:StartTumble()
 
+    -- Safety net: plane spawned over void or got stuck and never hit ground.
+    -- The class check is CRITICAL: after CrashExplode removes this entity (at t+3.5s),
+    -- the engine may recycle the same EntIndex for a completely different entity.
+    -- Without the class guard, ent:CrashExplode() at t+20s would call a nil method
+    -- on that recycled entity, producing the "attempt to call method 'CrashExplode'
+    -- (a nil value)" error at line 550.
     local entIdx = self:EntIndex()
     timer.Simple(20, function()
         local ent = Entity(entIdx)
@@ -637,13 +584,6 @@ function ENT:Think()
     if not IsValid(self.PhysObj) then self.PhysObj = self:GetPhysicsObject() end
     if IsValid(self.PhysObj) and self.PhysObj:IsAsleep() then self.PhysObj:Wake() end
     FlushPendingSounds()
-
-    -- Obstacle probe on its own interval
-    if ct >= (self.NextProbeTime or 0) then
-        self:ProbeObstacles()
-        self.NextProbeTime = ct + EVADE_INTERVAL
-    end
-
     self:HandleWeaponWindow(ct)
     self:UpdateActiveGAUBursts(ct)
     self:NextThink(ct)
@@ -652,74 +592,46 @@ end
 
 function ENT:PhysicsUpdate(phys)
     if self.IsTumbling or self.IsDestroyed then return end
+
     if not self.DieTime or not self.sky then return end
     if CurTime() >= self.DieTime then self:Remove() return end
-
-    local dt  = engine.TickInterval()
     local pos = self:GetPos()
     self.LastPos = pos
-
-    -- Altitude drift
     if CurTime() >= self.AltDriftNextPick then
         self.AltDriftTarget   = self.sky + math.Rand(-self.AltDriftRange, self.AltDriftRange)
         self.AltDriftNextPick = CurTime() + math.Rand(12, 30)
     end
     self.AltDriftCurrent = Lerp(self.AltDriftLerp, self.AltDriftCurrent, self.AltDriftTarget)
-    self.JitterPhase     = self.JitterPhase + 0.02
-    local liveAlt        = self.AltDriftCurrent + math.sin(self.JitterPhase) * self.JitterAmplitude
-
-    -- --------------------------------------------------------
-    -- ORBIT CORRECTION
-    -- dt-scaled so it is independent of tick rate.
-    -- ORBIT_TURN_RATE deg/s = very slow, heavy-aircraft feel.
-    -- Only fires when outside the orbit radius.
-    -- --------------------------------------------------------
+    self.JitterPhase = self.JitterPhase + 0.02
+    local jitter     = math.sin(self.JitterPhase) * self.JitterAmplitude
+    local liveAlt    = self.AltDriftCurrent + jitter
     local flatPos    = Vector(pos.x, pos.y, 0)
     local flatCenter = Vector(self.CenterPos.x, self.CenterPos.y, 0)
     local dist       = flatPos:Distance(flatCenter)
-    local orbitYaw   = 0
-    if dist > self.OrbitRadius then
-        orbitYaw = ORBIT_TURN_RATE * dt  -- degrees this tick
+    local orbitYaw = 0
+    if dist > self.OrbitRadius and (self.TurnDelay or 0) < CurTime() then
+        orbitYaw = 0.1 self.TurnDelay = CurTime() + 0.02
     end
-
-    -- --------------------------------------------------------
-    -- EVASION
-    -- EvadeYawRate is desired deg/s set by ProbeObstacles.
-    -- EvadeYawSmoothed lerps toward it slowly (heavy banking).
-    -- Multiply by dt to get degrees this tick.
-    -- --------------------------------------------------------
-    self.EvadeYawSmoothed = Lerp(EVADE_SMOOTH, self.EvadeYawSmoothed or 0, self.EvadeYawRate or 0)
-    local evasionYaw      = self.EvadeYawSmoothed * dt
-
-    -- --------------------------------------------------------
-    -- NOTE: skyYaw block removed.
-    -- util.QuickTrace toward sky on maps with a sky ceiling
-    -- returned HitSky=true almost every tick, adding 0.3 deg
-    -- per tick (~20 deg/s) regardless of direction, which spun
-    -- the plane into the skybox wall. The probe system handles
-    -- solid walls; the sky ceiling is never a solid brush so
-    -- it will never appear in MASK_SOLID_BRUSHONLY traces.
-    -- --------------------------------------------------------
-
-    self.ang = self.ang + Angle(0, orbitYaw + evasionYaw, 0)
-
+    local trSkyCheck = util.QuickTrace(self:GetPos(), self:GetForward() * 3000, self)
+    local skyYaw = 0
+    if trSkyCheck.HitSky then skyYaw = 0.3 end
+    self.ang = self.ang + Angle(0, orbitYaw + skyYaw, 0)
     local currentYaw  = self.ang.y
     local rawYawDelta = math.NormalizeAngle(currentYaw - (self.PrevYaw or currentYaw))
     self.PrevYaw      = currentYaw
     self.flightYaw    = currentYaw
-
     local targetRoll  = math.Clamp(rawYawDelta * -18, -15, 15)
     local rollLerp    = rawYawDelta ~= 0 and 0.08 or 0.04
     self.SmoothedRoll = Lerp(rollLerp, self.SmoothedRoll, targetRoll)
-
-    local forward      = self.ang:Forward()
-    local vel          = forward * self.Speed
-    local targetPitch  = math.Clamp(-vel.z * 0.02, -8, 8)
+    local forward     = self.ang:Forward()
+    local vel         = forward * self.Speed
+    local targetPitch = math.Clamp(-vel.z * 0.02, -8, 8)
     self.SmoothedPitch = Lerp(0.03, self.SmoothedPitch, targetPitch)
-
     local finalAng = Angle(self.SmoothedPitch, self.ang.y, self.SmoothedRoll)
     phys:SetAngles(finalAng)
-    phys:SetPos(Vector(pos.x + vel.x * dt, pos.y + vel.y * dt, liveAlt))
+    phys:SetPos(Vector(pos.x + vel.x * engine.TickInterval(),
+                       pos.y + vel.y * engine.TickInterval(),
+                       liveAlt))
     phys:SetVelocity(vel)
 end
 
@@ -792,6 +704,7 @@ function ENT:ArmWeapon(weapon, ct)
         self.GAU_SweepStartPos = targetPos - sweepDir * self.GAU_SweepHalfLength
         self.GAU_SweepEndPos   = targetPos + sweepDir * self.GAU_SweepHalfLength
     elseif self.CurrentWeapon == "jassm" then
+        -- Reset per-salvo shot counter; JASSM_DeployCount tracks lifetime total separately
         self.JASSM_SalvoFired = 0
     end
 end
@@ -1081,6 +994,11 @@ end
 
 -- ============================================================
 -- W1: JASSM
+-- Mirrors the C-17's SpawnOneJASSM safety architecture:
+--   1. dropIndex is 0-based per-salvo (not a lifetime counter)
+--   2. Altitude guard: abort if drop height < JASSM_MIN_DROP_HEIGHT
+--   3. SkyHeightAdd computed with freefall clearance, matching C-17 formula
+--   4. NoCollide hold on spawn to prevent self-intersection ignition
 -- ============================================================
 function ENT:SpawnOneJASSM(dropIndex)
     dropIndex = dropIndex or 0
@@ -1090,12 +1008,14 @@ function ENT:SpawnOneJASSM(dropIndex)
     end
     if (self.JASSM_Stock or 0) <= 0 then self:Debug("JASSM: bay empty") return false end
 
+    -- Build drop position: tail attachment point, stacked downward by AltOffset per index
     local tailWorld = self:LocalToWorld(self.JASSM_TailOffset)
     local dropPos   = Vector(tailWorld.x, tailWorld.y, tailWorld.z - (dropIndex * self.JASSM_AltOffset))
     if not util.IsInWorld(dropPos) then
         dropPos = Vector(self.CenterPos.x, self.CenterPos.y, self:GetPos().z - (dropIndex * self.JASSM_AltOffset))
     end
 
+    -- Altitude safety guard: refuse to drop if too close to the ground
     local groundZ    = self:FindGround(dropPos)
     if groundZ == -1 then groundZ = self.CenterPos.z end
     local dropHeight = math.max(dropPos.z - groundZ, 0)
@@ -1104,6 +1024,7 @@ function ENT:SpawnOneJASSM(dropIndex)
         return false
     end
 
+    -- SkyHeightAdd: freefall clearance budget, floored at SHA_FLOOR (mirrors C-17)
     local shaMax = (dropHeight - JASSM_MIN_FREEFALL_CLEARANCE) / 1.25
     local sha    = math.max(shaMax, JASSM_SHA_FLOOR)
 
@@ -1133,6 +1054,7 @@ function ENT:SpawnOneJASSM(dropIndex)
 
     if not IsValid(jassm) then return false end
 
+    -- NoCollide hold: prevents the missile clipping the fuselage on release
     local mHandle = constraint.NoCollide(jassm, self, 0, 0)
     timer.Simple(1.25, function()
         if IsValid(mHandle) then mHandle:Remove() end
@@ -1146,6 +1068,7 @@ function ENT:SpawnOneJASSM(dropIndex)
 end
 
 function ENT:UpdateJASSM(ct)
+    -- One salvo per weapon window; JASSM_SalvoFired is reset in ArmWeapon
     if self.JASSM_SalvoFired >= 1 then return end
     if self.JASSM_Stock <= 0 then self.JASSM_SalvoFired = 1 return end
 
@@ -1157,6 +1080,8 @@ function ENT:UpdateJASSM(ct)
 
     local entIdx = self:EntIndex()
 
+    -- dropIndex is 0-based and per-salvo, NOT a lifetime deploy counter.
+    -- This ensures correct altitude stacking (0 * AltOffset, 1 * AltOffset, 2 * AltOffset).
     self:SpawnOneJASSM(0)
 
     if salvoCount >= 2 then
