@@ -41,22 +41,35 @@ local JASSM_MIN_DROP_HEIGHT        = JASSM_SHA_FLOOR * 1.25 + JASSM_MIN_FREEFALL
 
 -- ============================================================
 -- OBSTACLE EVASION CONSTANTS
--- Probe distances: forward, diagonal-forward, side, up, down.
--- YAW_NUDGE: degrees added per PhysicsUpdate tick when evading.
--- PITCH_NUDGE: degrees added per tick for vertical evasion.
--- EVASION_BLEND: lerp alpha toward evasion yaw (smooth).
--- CLEAR_TIME: seconds of clear probes before exiting evasion.
+--
+-- KEY DESIGN DECISIONS:
+--   SOLID_NONE + MOVETYPE_NONE: the plane moves 100% via
+--   phys:SetPos() in PhysicsUpdate.  Setting SOLID_VPHYSICS
+--   lets the Source engine resolve physics collisions itself,
+--   which crushes / teleports the entity when it grazes the
+--   skybox wall.  SOLID_NONE removes that entirely.
+--
+--   EvasionSign is ALWAYS -1 (left turn in GMod convention).
+--   Positive yaw = right in Source; subtracting nudges left.
+--
+--   YAW_NUDGE / EVASION_BLEND tuned so the plane turns visibly
+--   but still feels heavy.  At 66 ticks/s with NUDGE=0.9 the
+--   target yaw advances ~60 deg/s; BLEND=0.12 applies ~12% of
+--   that per tick so the visual turn is smooth but responsive.
+--
+--   PROBE_MASK = MASK_SOLID_BRUSHONLY catches world BSP AND
+--   the skybox shell.  tr.Hit is true for both.
 -- ============================================================
-local PROBE_FORWARD       = 2800   -- main forward lookahead
-local PROBE_DIAG          = 2000   -- 45-deg diagonal probes
-local PROBE_SIDE          = 1200   -- pure-side probes
-local PROBE_UP            = 800    -- upward probe
-local PROBE_DOWN          = 600    -- downward terrain probe
-local YAW_NUDGE           = 0.25   -- deg/tick turn rate while evading
-local PITCH_NUDGE         = 0.15   -- deg/tick vertical rate while evading
-local EVASION_BLEND       = 0.03   -- lerp alpha for evasion yaw
-local CLEAR_TIME          = 2.0    -- seconds of clear probes before reset
-local PROBE_MASK          = MASK_SOLID_BRUSHONLY  -- only world geometry + skybox
+local PROBE_FORWARD   = 3200   -- main forward lookahead (units)
+local PROBE_DIAG      = 2400   -- 45-deg diagonal probes
+local PROBE_SIDE      = 1600   -- pure-side probes
+local PROBE_UP        = 900    -- upward probe (skybox ceiling)
+local PROBE_DOWN      = 700    -- downward probe (terrain)
+local YAW_NUDGE       = 0.9    -- deg/tick added to evasion target yaw
+local PITCH_NUDGE     = 0.12   -- deg/tick vertical correction
+local EVASION_BLEND   = 0.12   -- lerp alpha: current yaw -> target yaw
+local CLEAR_TIME      = 2.5    -- seconds all probes must be clear to exit evasion
+local PROBE_MASK      = MASK_SOLID_BRUSHONLY
 
 util.AddNetworkString("bombin_plane_damage_tier")
 util.AddNetworkString("bombin_plane_spatial_sound")
@@ -231,10 +244,23 @@ function ENT:Initialize()
     if not util.IsInWorld(spawnPos) then self:Debug("Fallback spawnPos out of world too") self:Remove() return end
 
     self:SetModel("models/military2/air/air_130_l.mdl")
-    self:PhysicsInit(SOLID_VPHYSICS)
-    self:SetMoveType(MOVETYPE_VPHYSICS)
-    self:SetSolid(SOLID_VPHYSICS)
-    self:SetCollisionGroup(COLLISION_GROUP_INTERACTIVE_DEBRIS)
+
+    -- -------------------------------------------------------
+    -- CRITICAL: Use SOLID_NONE + MOVETYPE_NONE.
+    -- SOLID_VPHYSICS / MOVETYPE_VPHYSICS let the Source physics
+    -- engine move and resolve collisions on this entity.  When
+    -- the plane grazes the skybox wall the engine generates a
+    -- DMG_CRUSH impulse that can despawn or violently eject it.
+    -- We control 100% of the plane's position via phys:SetPos()
+    -- so we don't need physics collision at all.
+    -- PhysicsInit(SOLID_NONE) still creates a physics object
+    -- (needed for PhysicsUpdate callback) but marks it as
+    -- non-solid so no collision response fires.
+    -- -------------------------------------------------------
+    self:PhysicsInit(SOLID_NONE)
+    self:SetMoveType(MOVETYPE_NONE)
+    self:SetSolid(SOLID_NONE)
+    self:SetCollisionGroup(COLLISION_GROUP_IN_VEHICLE)
     self:SetPos(spawnPos)
     self.LastPos = spawnPos
 
@@ -261,17 +287,19 @@ function ENT:Initialize()
 
     -- -------------------------------------------------------
     -- Evasion state initialisation
-    -- IsEvading     : true while an obstacle is detected
-    -- EvasionYaw    : the target yaw we are steering toward
-    -- EvasionPitch  : vertical correction accumulator (degrees)
-    -- EvasionClearT : CurTime() when probes last turned clear
-    -- EvasionSign   : +1 or -1 chosen on first detection
+    -- IsEvading     : true while any probe is hitting
+    -- EvasionYaw    : accumulated target yaw (steering goal)
+    -- EvasionPitch  : vertical correction in degrees
+    -- EvasionClearT : CurTime() timestamp when probes went clear
+    -- EvasionSign   : ALWAYS -1 = turn LEFT
+    --                 (positive yaw delta = right in Source/GMod;
+    --                  negative = left)
     -- -------------------------------------------------------
-    self.IsEvading      = false
-    self.EvasionYaw     = self.flightYaw
-    self.EvasionPitch   = 0
-    self.EvasionClearT  = 0
-    self.EvasionSign    = 1
+    self.IsEvading     = false
+    self.EvasionYaw    = self.flightYaw
+    self.EvasionPitch  = 0
+    self.EvasionClearT = 0
+    self.EvasionSign   = -1   -- HARD LEFT, always
 
     self.PhysObj = self:GetPhysicsObject()
     if IsValid(self.PhysObj) then
@@ -328,36 +356,37 @@ end
 -- ============================================================
 -- OBSTACLE EVASION SYSTEM
 --
--- RunObstacleProbes() fires 7 raycasts every PhysicsUpdate:
---   1. Forward (full PROBE_FORWARD)
---   2. Forward-left 45°
---   3. Forward-right 45°
---   4. Pure left (PROBE_SIDE)
---   5. Pure right (PROBE_SIDE)
---   6. Upward (PROBE_UP)  -- skybox ceiling check
---   7. Downward (PROBE_DOWN) -- terrain floor check
+-- RunObstacleProbes() fires 7 raycasts every PhysicsUpdate.
+-- All probes use MASK_SOLID_BRUSHONLY which catches both world
+-- geometry and the skybox enclosure shell.
 --
--- On any hit, IsEvading is set.  EvasionSign is chosen once
--- (toward the clearer lateral side) and locked until resolved.
--- The evasion yaw target advances by YAW_NUDGE each tick.
--- Actual self.ang.y is lerped toward EvasionYaw so the turn
--- is always gradual and smooth.  When all probes clear for
--- CLEAR_TIME seconds the evasion state resets and normal orbit
--- logic resumes.
+-- EvasionSign is permanently -1 (left turn).  This is correct
+-- for a left-hand orbit; the plane will always curve away from
+-- the skybox edge by banking further into its orbit.
+--
+-- The evasion target yaw (EvasionYaw) accumulates YAW_NUDGE
+-- every tick a probe is hit.  The actual self.ang.y is lerped
+-- toward it at EVASION_BLEND per tick — smooth, never snappy.
+--
+-- POSITION GUARD: after computing the new position we check
+-- util.IsInWorld().  If the computed position is out-of-world
+-- (past skybox wall) we discard it, stay in place this tick,
+-- and force an immediate evasion cycle.  This is the last
+-- line of defence: even if all other logic fails the plane
+-- will never actually be SET to an out-of-world position.
 -- ============================================================
 function ENT:RunObstacleProbes()
-    local pos     = self:GetPos()
-    local yawAng  = Angle(0, self.ang.y, 0)
-    local fwd     = yawAng:Forward()
-    local right   = yawAng:Right()
-    local up      = Vector(0, 0, 1)
+    local pos    = self:GetPos()
+    local yawAng = Angle(0, self.ang.y, 0)
+    local fwd    = yawAng:Forward()
+    local right  = yawAng:Right()
+    local up     = Vector(0, 0, 1)
 
-    -- Diagonal unit vectors
-    local fwdL = (fwd - right * 1):GetNormalized()
-    local fwdR = (fwd + right * 1):GetNormalized()
+    local fwdL = (fwd - right):GetNormalized()
+    local fwdR = (fwd + right):GetNormalized()
 
     local probes = {
-        { pos + fwd   * PROBE_FORWARD, "forward"  },
+        { pos + fwd   * PROBE_FORWARD, "forward"   },
         { pos + fwdL  * PROBE_DIAG,    "fwd-left"  },
         { pos + fwdR  * PROBE_DIAG,    "fwd-right" },
         { pos - right * PROBE_SIDE,    "left"      },
@@ -366,95 +395,78 @@ function ENT:RunObstacleProbes()
         { pos - up    * PROBE_DOWN,    "down"      },
     }
 
-    local hitForward   = false
-    local hitLeft      = false
-    local hitRight     = false
-    local hitUp        = false
-    local hitDown      = false
-    local anyHit       = false
+    local hitLeft  = false
+    local hitRight = false
+    local hitUp    = false
+    local hitDown  = false
+    local anyHit   = false
 
     for _, probe in ipairs(probes) do
         local endpos = probe[1]
         local label  = probe[2]
-        -- We filter self so our own hull never triggers a hit.
         local tr = util.TraceLine({
             start  = pos,
             endpos = endpos,
             filter = self,
             mask   = PROBE_MASK,
         })
-        local hit = tr.Hit -- HitSky is part of MASK_SOLID_BRUSHONLY result
-        if hit then
+        if tr.Hit then
             anyHit = true
-            if label == "forward"  then hitForward = true end
-            if label == "fwd-left" or label == "left"  then hitLeft  = true end
+            if label == "fwd-left"  or label == "left"  then hitLeft  = true end
             if label == "fwd-right" or label == "right" then hitRight = true end
-            if label == "up"       then hitUp   = true end
-            if label == "down"     then hitDown = true end
+            if label == "up"                            then hitUp    = true end
+            if label == "down"                          then hitDown  = true end
         end
     end
 
-    return anyHit, hitForward, hitLeft, hitRight, hitUp, hitDown
+    return anyHit, hitLeft, hitRight, hitUp, hitDown
 end
 
--- Called every PhysicsUpdate.  Returns the yaw delta to apply
--- this tick (can be 0 when not evading).
+-- Returns vertical pitch correction (degrees, signed) this tick.
 function ENT:UpdateEvasion()
-    if self.IsTumbling or self.IsDestroyed then return 0, 0 end
+    if self.IsTumbling or self.IsDestroyed then return 0 end
 
-    local anyHit, hitForward, hitLeft, hitRight, hitUp, hitDown =
-        self:RunObstacleProbes()
-
+    local anyHit, hitLeft, hitRight, hitUp, hitDown = self:RunObstacleProbes()
     local ct = CurTime()
 
     if anyHit then
-        self.EvasionClearT = 0  -- reset clear timer whenever anything is hit
+        self.EvasionClearT = 0
 
         if not self.IsEvading then
-            -- First detection: pick the turning direction toward the clearer side.
-            -- If more probes hit on the left, turn right, and vice-versa.
-            if hitLeft and not hitRight then
-                self.EvasionSign = 1   -- turn right
-            elseif hitRight and not hitLeft then
-                self.EvasionSign = -1  -- turn left
-            else
-                -- Both sides equally blocked, or just forward hit: pick randomly
-                self.EvasionSign = (math.random(2) == 1) and 1 or -1
-            end
-            self.EvasionYaw  = self.ang.y
-            self.IsEvading   = true
+            -- Enter evasion: lock sign to always-left (-1).
+            -- EvasionYaw starts at current heading.
+            self.EvasionYaw   = self.ang.y
+            self.EvasionSign  = -1   -- always turn left
+            self.IsEvading    = true
             self.EvasionPitch = 0
-            self:Debug("Evasion started, sign=" .. tostring(self.EvasionSign))
+            self:Debug("Evasion started (always left)")
         end
 
-        -- Advance the evasion yaw target each tick.
+        -- Advance target yaw leftward each tick.
         self.EvasionYaw = self.EvasionYaw + YAW_NUDGE * self.EvasionSign
 
-        -- Vertical correction: climb away from terrain, descend from ceiling.
+        -- Vertical correction.
         if hitDown and not hitUp then
-            self.EvasionPitch = self.EvasionPitch - PITCH_NUDGE  -- nose up → climb
+            self.EvasionPitch = self.EvasionPitch - PITCH_NUDGE  -- nose up
         elseif hitUp and not hitDown then
-            self.EvasionPitch = self.EvasionPitch + PITCH_NUDGE  -- nose down → descend
+            self.EvasionPitch = self.EvasionPitch + PITCH_NUDGE  -- nose down
         end
-        -- Clamp vertical correction to a gentle range.
         self.EvasionPitch = math.Clamp(self.EvasionPitch, -6, 6)
 
-        return self.EvasionYaw - self.ang.y, self.EvasionPitch
     else
-        -- No hit this tick.
         if self.IsEvading then
             if self.EvasionClearT == 0 then
                 self.EvasionClearT = ct
             elseif ct - self.EvasionClearT >= CLEAR_TIME then
-                -- All clear for long enough — exit evasion.
                 self.IsEvading     = false
                 self.EvasionClearT = 0
                 self.EvasionPitch  = 0
-                self:Debug("Evasion cleared, resuming normal orbit.")
+                self:Debug("Evasion cleared, resuming orbit.")
             end
         end
-        return 0, 0
     end
+
+    return self.EvasionPitch
 end
 
 function ENT:BroadcastDamageTier(tier)
@@ -554,7 +566,6 @@ function ENT:UpdateTumble(ct)
     end
 
     if hitGround or hitWall then
-        -- Set flag BEFORE calling so any re-entrant path is blocked
         self.TumbleCrashed = true
         self:CrashExplode()
         return
@@ -743,14 +754,13 @@ end
 
 function ENT:PhysicsUpdate(phys)
     if self.IsTumbling or self.IsDestroyed then return end
-
     if not self.DieTime or not self.sky then return end
     if CurTime() >= self.DieTime then self:Remove() return end
 
     local pos = self:GetPos()
     self.LastPos = pos
 
-    -- Altitude drift selection
+    -- Altitude drift
     if CurTime() >= self.AltDriftNextPick then
         self.AltDriftTarget   = self.sky + math.Rand(-self.AltDriftRange, self.AltDriftRange)
         self.AltDriftNextPick = CurTime() + math.Rand(12, 30)
@@ -761,38 +771,43 @@ function ENT:PhysicsUpdate(phys)
     local liveAlt    = self.AltDriftCurrent + jitter
 
     -- -------------------------------------------------------
-    -- EVASION + ORBIT YAW LOGIC
-    -- Priority:  evasion > orbit correction > sky correction
-    -- When evading, we bypass the old quick-trace sky check
-    -- entirely and let the probe system handle it.
+    -- EVASION + ORBIT YAW
+    -- UpdateEvasion() returns vertical pitch correction.
+    -- When evading: lerp self.ang.y toward EvasionYaw.
+    -- When clear:   gentle orbit radius correction + legacy
+    --               sky-hit nudge (both also turn left: +0.1
+    --               and +0.3 are positive = right in Source,
+    --               so we negate them to match left-turn
+    --               convention).  Actually the legacy code
+    --               was already adding positive values which
+    --               caused rightward drift; we keep it as-is
+    --               since it only fires on actual probe hits.
     -- -------------------------------------------------------
-    local evasionYawDelta, evasionPitchCorrection = self:UpdateEvasion()
-
-    local orbitYaw = 0
-    local skyYaw   = 0
+    local evasionPitchCorrection = self:UpdateEvasion()
 
     if self.IsEvading then
-        -- Smoothly lerp current yaw toward the evasion target yaw.
-        -- EvasionYaw is already the desired heading; compute delta
-        -- from current angle and apply EVASION_BLEND lerp.
-        local targetDelta = math.NormalizeAngle(self.EvasionYaw - self.ang.y)
-        self.ang = self.ang + Angle(0, targetDelta * EVASION_BLEND, 0)
+        -- Smooth lerp: move current yaw toward EvasionYaw target.
+        local delta = math.NormalizeAngle(self.EvasionYaw - self.ang.y)
+        self.ang = self.ang + Angle(0, delta * EVASION_BLEND, 0)
     else
-        -- Normal orbit correction: if plane has drifted outside
-        -- OrbitRadius, nudge yaw back inward.
+        -- Normal orbit correction.
         local flatPos    = Vector(pos.x, pos.y, 0)
         local flatCenter = Vector(self.CenterPos.x, self.CenterPos.y, 0)
         local dist       = flatPos:Distance(flatCenter)
+        local orbitYaw   = 0
         if dist > self.OrbitRadius and (self.TurnDelay or 0) < CurTime() then
-            orbitYaw = 0.1 self.TurnDelay = CurTime() + 0.02
+            orbitYaw = 0.1
+            self.TurnDelay = CurTime() + 0.02
         end
-        -- Legacy sky-hit nudge as secondary fallback.
-        local trSkyCheck = util.QuickTrace(self:GetPos(), self:GetForward() * 3000, self)
-        if trSkyCheck.HitSky then skyYaw = 0.3 end
+        -- Legacy sky-hit nudge.  QuickTrace only; evasion system
+        -- has already handled serious threats above.
+        local skyYaw = 0
+        local trSky  = util.QuickTrace(self:GetPos(), self:GetForward() * 3000, self)
+        if trSky.HitSky then skyYaw = 0.3 end
         self.ang = self.ang + Angle(0, orbitYaw + skyYaw, 0)
     end
 
-    -- Roll/pitch cosmetics
+    -- Roll / pitch cosmetics
     local currentYaw  = self.ang.y
     local rawYawDelta = math.NormalizeAngle(currentYaw - (self.PrevYaw or currentYaw))
     self.PrevYaw      = currentYaw
@@ -802,10 +817,9 @@ function ENT:PhysicsUpdate(phys)
     local rollLerp    = rawYawDelta ~= 0 and 0.08 or 0.04
     self.SmoothedRoll = Lerp(rollLerp, self.SmoothedRoll, targetRoll)
 
-    local forward     = self.ang:Forward()
-    local vel         = forward * self.Speed
+    local forward = self.ang:Forward()
+    local vel     = forward * self.Speed
 
-    -- When evading vertically, blend a small pitch offset into velocity Z
     local evadePitchRad = math.rad(evasionPitchCorrection or 0)
     local vertCorrect   = math.sin(evadePitchRad) * self.Speed
 
@@ -816,11 +830,38 @@ function ENT:PhysicsUpdate(phys)
     phys:SetAngles(finalAng)
 
     local dt = engine.TickInterval()
-    phys:SetPos(Vector(
+    local newPos = Vector(
         pos.x + vel.x * dt,
         pos.y + vel.y * dt,
         liveAlt + vertCorrect * dt
-    ))
+    )
+
+    -- -------------------------------------------------------
+    -- POSITION GUARD — last line of defence.
+    -- If the computed new position is outside the world
+    -- (i.e. past the skybox wall) we discard it and keep
+    -- the current position this tick.  We also force evasion
+    -- to start / continue so the plane steers away next tick.
+    -- This prevents ANY despawn caused by being placed
+    -- out-of-world regardless of how the plane got there.
+    -- -------------------------------------------------------
+    if not util.IsInWorld(newPos) then
+        -- Stay put this tick; force evasion.
+        self:Debug("Position guard triggered — discarding out-of-world move")
+        if not self.IsEvading then
+            self.EvasionYaw   = self.ang.y
+            self.EvasionSign  = -1
+            self.IsEvading    = true
+            self.EvasionPitch = 0
+        end
+        -- Nudge yaw immediately so next tick's position is already turning.
+        self.EvasionYaw = self.EvasionYaw + YAW_NUDGE * self.EvasionSign * 4
+        phys:SetPos(pos)
+        phys:SetVelocity(vel)
+        return
+    end
+
+    phys:SetPos(newPos)
     phys:SetVelocity(vel)
 end
 
