@@ -183,6 +183,73 @@ ENT.JASSM_TailOffset = Vector(-420, 0, 0)
 ENT.MaxHP = 8000
 ENT.DamageTierThresholds = { 0.75, 0.50, 0.25 }
 
+-- ============================================================
+-- OBSTACLE EVASION CONSTANTS
+-- EVADE_PROBE_DIST  : how far each ray looks ahead (long sight)
+-- EVADE_NUM_RAYS    : number of horizontal directions to probe
+-- EVADE_PUSH_GAIN   : how sharply the plane steers away per blocked ray
+-- EVADE_SMOOTH      : lerp speed of the evasion yaw accumulator (smoothness)
+-- EVADE_MAX_YAW_ADD : hard cap on evasion yaw added per tick (deg)
+-- EVADE_INTERVAL    : seconds between full probe sweeps (performance)
+-- ============================================================
+local EVADE_PROBE_DIST  = 6000
+local EVADE_NUM_RAYS    = 8
+local EVADE_PUSH_GAIN   = 2.2
+local EVADE_SMOOTH      = 0.06
+local EVADE_MAX_YAW_ADD = 4.0
+local EVADE_INTERVAL    = 0.25
+
+-- ============================================================
+-- ProbeObstacles: casts EVADE_NUM_RAYS evenly around the plane
+-- at flight altitude, accumulates a signed yaw push away from
+-- any blocked direction, and stores it in self.EvadeYawPush.
+-- Called on a timer (EVADE_INTERVAL) to keep cost low.
+-- ============================================================
+function ENT:ProbeObstacles()
+    local pos    = self:GetPos()
+    local skyZ   = self.sky or pos.z
+    local origin = Vector(pos.x, pos.y, skyZ)
+    local step   = 360 / EVADE_NUM_RAYS
+    local fwd    = self.ang and self.ang:Forward() or self:GetForward()
+    local myYaw  = math.atan2(fwd.y, fwd.x) -- radians, current heading
+
+    local pushX, pushY = 0, 0
+
+    for i = 0, EVADE_NUM_RAYS - 1 do
+        local deg = i * step
+        local rad = math.rad(deg)
+        local dir = Vector(math.cos(rad), math.sin(rad), 0)
+        local tr  = util.TraceLine({
+            start  = origin,
+            endpos = origin + dir * EVADE_PROBE_DIST,
+            filter = self,
+            mask   = MASK_SOLID_BRUSHONLY,
+        })
+
+        if tr.Hit and not tr.HitSky then
+            -- Weight: closer hits push harder
+            local hitFrac = tr.Fraction  -- 0 = very close, 1 = far edge
+            local weight  = (1 - hitFrac) * EVADE_PUSH_GAIN
+            -- Repulsion vector: push away from the hit direction
+            pushX = pushX - dir.x * weight
+            pushY = pushY - dir.y * weight
+        end
+    end
+
+    -- Convert accumulated push vector into a signed yaw delta (degrees)
+    local pushLen = math.sqrt(pushX * pushX + pushY * pushY)
+    if pushLen > 0.01 then
+        local pushYaw = math.atan2(pushY, pushX)  -- target heading in radians
+        -- Signed angular difference between push heading and current heading
+        local delta   = math.NormalizeAngle(math.deg(pushYaw) - math.deg(myYaw))
+        -- Store as desired evasion yaw offset (sign drives left/right turn)
+        self.EvadeYawDesired = math.Clamp(delta * 0.5, -EVADE_MAX_YAW_ADD * 4, EVADE_MAX_YAW_ADD * 4)
+    else
+        -- No obstacles: bleed evasion desire back to zero
+        self.EvadeYawDesired = 0
+    end
+end
+
 function ENT:Initialize()
     self.CenterPos    = self:GetVar("CenterPos", self:GetPos())
     self.CallDir      = self:GetVar("CallDir", Vector(1, 0, 0))
@@ -239,6 +306,11 @@ function ENT:Initialize()
     self.SmoothedRoll    = 0
     self.SmoothedPitch   = 0
     self.PrevYaw         = self:GetAngles().y
+
+    -- Evasion state
+    self.EvadeYawDesired  = 0
+    self.EvadeYawSmoothed = 0
+    self.NextProbeTime    = CurTime() + EVADE_INTERVAL
 
     self.PhysObj = self:GetPhysicsObject()
     if IsValid(self.PhysObj) then
@@ -584,6 +656,13 @@ function ENT:Think()
     if not IsValid(self.PhysObj) then self.PhysObj = self:GetPhysicsObject() end
     if IsValid(self.PhysObj) and self.PhysObj:IsAsleep() then self.PhysObj:Wake() end
     FlushPendingSounds()
+
+    -- Run the obstacle probe on its own interval to keep tick cost low
+    if ct >= (self.NextProbeTime or 0) then
+        self:ProbeObstacles()
+        self.NextProbeTime = ct + EVADE_INTERVAL
+    end
+
     self:HandleWeaponWindow(ct)
     self:UpdateActiveGAUBursts(ct)
     self:NextThink(ct)
@@ -605,6 +684,10 @@ function ENT:PhysicsUpdate(phys)
     self.JitterPhase = self.JitterPhase + 0.02
     local jitter     = math.sin(self.JitterPhase) * self.JitterAmplitude
     local liveAlt    = self.AltDriftCurrent + jitter
+
+    -- --------------------------------------------------------
+    -- ORBIT: same tangent+radial logic as before
+    -- --------------------------------------------------------
     local flatPos    = Vector(pos.x, pos.y, 0)
     local flatCenter = Vector(self.CenterPos.x, self.CenterPos.y, 0)
     local dist       = flatPos:Distance(flatCenter)
@@ -612,10 +695,27 @@ function ENT:PhysicsUpdate(phys)
     if dist > self.OrbitRadius and (self.TurnDelay or 0) < CurTime() then
         orbitYaw = 0.1 self.TurnDelay = CurTime() + 0.02
     end
+
+    -- --------------------------------------------------------
+    -- EVASION: smooth the desired yaw push into a per-tick add
+    -- The smoother filters out sudden probe changes so the plane
+    -- banks gradually rather than snapping direction.
+    -- --------------------------------------------------------
+    local evadeDesired = self.EvadeYawDesired or 0
+    self.EvadeYawSmoothed = Lerp(EVADE_SMOOTH, self.EvadeYawSmoothed or 0, evadeDesired)
+    local evasionYaw = math.Clamp(self.EvadeYawSmoothed * engine.TickInterval() * 6,
+                                  -EVADE_MAX_YAW_ADD, EVADE_MAX_YAW_ADD)
+
+    -- --------------------------------------------------------
+    -- Sky-ceiling: keep nudging away if heading toward a sky hit
+    -- (kept from original, but evasion system can also catch this)
+    -- --------------------------------------------------------
     local trSkyCheck = util.QuickTrace(self:GetPos(), self:GetForward() * 3000, self)
     local skyYaw = 0
     if trSkyCheck.HitSky then skyYaw = 0.3 end
-    self.ang = self.ang + Angle(0, orbitYaw + skyYaw, 0)
+
+    self.ang = self.ang + Angle(0, orbitYaw + skyYaw + evasionYaw, 0)
+
     local currentYaw  = self.ang.y
     local rawYawDelta = math.NormalizeAngle(currentYaw - (self.PrevYaw or currentYaw))
     self.PrevYaw      = currentYaw
