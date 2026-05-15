@@ -51,6 +51,32 @@ local VOL_FALLOFF_EXP = 0.01
 local NEAR_OFFSET     = 40
 local WEAPON_LEVEL    = 150
 
+-- ============================================================
+-- EVASION TUNING  (ported from lancet-dive)
+-- Distances are scaled up relative to the lancet because the
+-- AC-130 is much larger and slower, so it needs earlier warnings.
+-- ============================================================
+local SKY_PROBE_DIST_H   = 2000   -- horizontal sky-boundary look-ahead
+local SKY_PROBE_DIST_V   = 1200   -- vertical sky-boundary look-ahead
+local SKY_YAW_BIAS_RATE  = 0.30   -- yaw nudge per sky hit
+local SKY_YAW_BIAS_DECAY = 0.88   -- per-tick decay
+local SKY_ALT_PUSH       = 200    -- altitude nudge on sky hit (push down)
+local SKY_ALT_RISE       = 150    -- altitude nudge on sky-below hit (rise)
+
+local OBS_DIST_FWD     = 1400   -- forward geometry look-ahead
+local OBS_DIST_SIDE    = 1000   -- side look-ahead
+local OBS_DIST_UP      = 700    -- upward look-ahead
+local OBS_DIST_DOWN    = 400    -- downward look-ahead
+local OBS_YAW_RATE     = 0.50   -- yaw nudge per obstacle hit
+local OBS_ALT_PUSH_UP  = 300    -- alt push when obstacle below
+local OBS_ALT_PUSH_DN  = 100    -- alt push when obstacle above
+local OBS_YAW_DECAY    = 0.82   -- per-tick decay
+local OBS_ALT_DECAY    = 0.90   -- per-tick decay
+local OBS_EVAL_RATE    = 0.05   -- seconds between probe evaluations (20 Hz)
+local OBS_NEAR_FRAC    = 0.45   -- fraction of probe dist considered "close"
+local OBS_ESCALATE_MAX = 4      -- consecutive hits before orbit reversal
+local OBS_TRACE_MASK   = MASK_SOLID_BRUSHONLY
+
 local function PrecacheWeaponSounds()
     for _, s in ipairs(GAU_BRRT_SOUNDS) do util.PrecacheSound(s) end
     util.PrecacheSound("killstreak_rewards/ac-130_40mm_fire.wav")
@@ -240,6 +266,16 @@ function ENT:Initialize()
     self.SmoothedPitch   = 0
     self.PrevYaw         = self:GetAngles().y
 
+    -- ----------------------------------------------------------------
+    -- EVASION STATE  (ported from lancet-dive)
+    -- ----------------------------------------------------------------
+    self.SkyYawBias      = 0
+    self.ObsYawBias      = 0
+    self.ObsAltBias      = 0
+    self.ObsConsecHits   = 0
+    self.ObsLastEval     = 0
+    -- ----------------------------------------------------------------
+
     self.PhysObj = self:GetPhysicsObject()
     if IsValid(self.PhysObj) then
         self.PhysObj:Wake()
@@ -291,6 +327,111 @@ function ENT:Initialize()
 
     if not HasGred() then self:Debug("WARNING: Gred base not found; falling back to rpg_missile.") end
 end
+
+-- ============================================================
+-- EVASION PROBES  (ported from lancet-dive / ent_bombin_lancet)
+-- ============================================================
+
+-- Probes for sky-boundary hits (map edges / open sky below).
+-- Returns (yawBias, altPush) to be accumulated into the bias vars.
+function ENT:EvaluateSkyProbes(pos, flatFwd)
+    local flatRight = Vector(-flatFwd.y, flatFwd.x, 0)
+
+    local probes = {
+        { dir = flatFwd,                                             dist = SKY_PROBE_DIST_H, role = "fwd"   },
+        { dir = (flatFwd + flatRight * 0.7):GetNormalized(),         dist = SKY_PROBE_DIST_H, role = "right" },
+        { dir = (flatFwd - flatRight * 0.7):GetNormalized(),         dist = SKY_PROBE_DIST_H, role = "left"  },
+        { dir = Vector(flatFwd.x, flatFwd.y,  1):GetNormalized(),    dist = SKY_PROBE_DIST_V, role = "up"    },
+        { dir = Vector(flatFwd.x, flatFwd.y, -0.5):GetNormalized(),  dist = SKY_PROBE_DIST_V, role = "down"  },
+    }
+
+    local yawBias = 0
+    local altPush = 0
+
+    for _, p in ipairs(probes) do
+        local tr = util.QuickTrace(pos, p.dir * p.dist, self)
+        if not tr.HitSky then continue end
+
+        if p.role == "fwd" then
+            -- Steer in the current orbit direction to avoid the boundary ahead
+            yawBias = yawBias + SKY_YAW_BIAS_RATE * 2.0
+        elseif p.role == "right" then
+            yawBias = yawBias - SKY_YAW_BIAS_RATE
+        elseif p.role == "left" then
+            yawBias = yawBias + SKY_YAW_BIAS_RATE
+        elseif p.role == "up" then
+            altPush = altPush - SKY_ALT_PUSH
+        elseif p.role == "down" then
+            altPush = altPush + SKY_ALT_RISE
+        end
+    end
+
+    return yawBias, altPush
+end
+
+-- Probes for solid brush geometry (walls, mountains, buildings).
+-- Returns (yawBias, altPush). Also handles orbit-reversal escalation.
+function ENT:EvaluateObstacleProbes(pos, flatFwd)
+    local flatRight = Vector(-flatFwd.y, flatFwd.x, 0)
+
+    local probes = {
+        { dir = flatFwd,                                                   dist = OBS_DIST_FWD,       role = "fwd"      },
+        { dir = flatFwd,                                                   dist = OBS_DIST_FWD * 0.4, role = "fwd_near" },
+        { dir = (flatFwd + flatRight * 0.65):GetNormalized(),              dist = OBS_DIST_SIDE,      role = "right"    },
+        { dir = (flatFwd - flatRight * 0.65):GetNormalized(),              dist = OBS_DIST_SIDE,      role = "left"     },
+        { dir = Vector(flatFwd.x, flatFwd.y,  0.5):GetNormalized(),        dist = OBS_DIST_UP,        role = "up_fwd"   },
+        { dir = Vector(flatFwd.x, flatFwd.y, -0.4):GetNormalized(),        dist = OBS_DIST_DOWN,      role = "down_fwd" },
+    }
+
+    local yawBias = 0
+    local altPush = 0
+    local anyHit  = false
+
+    for _, p in ipairs(probes) do
+        local tr = util.TraceLine({
+            start  = pos,
+            endpos = pos + p.dir * p.dist,
+            filter = self,
+            mask   = OBS_TRACE_MASK,
+        })
+
+        if not tr.Hit or tr.HitSky then continue end
+
+        anyHit = true
+        local urgency = (tr.Fraction < OBS_NEAR_FRAC) and 2.0 or 1.0
+
+        if p.role == "fwd" or p.role == "fwd_near" then
+            local scale = (p.role == "fwd_near") and 1.5 or 1.0
+            yawBias = yawBias + OBS_YAW_RATE * urgency * scale
+            altPush = altPush + OBS_ALT_PUSH_UP * urgency * scale
+        elseif p.role == "right" then
+            yawBias = yawBias - OBS_YAW_RATE * urgency
+        elseif p.role == "left" then
+            yawBias = yawBias + OBS_YAW_RATE * urgency
+        elseif p.role == "up_fwd" then
+            altPush = altPush - OBS_ALT_PUSH_DN * urgency
+            yawBias = yawBias + OBS_YAW_RATE * 0.5 * urgency
+        elseif p.role == "down_fwd" then
+            altPush = altPush + OBS_ALT_PUSH_UP * 0.6 * urgency
+        end
+    end
+
+    if anyHit then
+        self.ObsConsecHits = (self.ObsConsecHits or 0) + 1
+        if self.ObsConsecHits >= OBS_ESCALATE_MAX then
+            -- Reverse the yaw direction and fire a hard kick to break out
+            yawBias            = yawBias + OBS_YAW_RATE * 4.0
+            self.ObsConsecHits = 0
+            self:Debug("Obstacle escalation — hard yaw reversal")
+        end
+    else
+        self.ObsConsecHits = math.max(0, (self.ObsConsecHits or 0) - 1)
+    end
+
+    return yawBias, altPush
+end
+
+-- ============================================================
 
 function ENT:BroadcastDamageTier(tier)
     net.Start("bombin_plane_damage_tier")
@@ -389,7 +530,6 @@ function ENT:UpdateTumble(ct)
     end
 
     if hitGround or hitWall then
-        -- Set flag BEFORE calling so any re-entrant path is blocked
         self.TumbleCrashed = true
         self:CrashExplode()
         return
@@ -456,7 +596,6 @@ local function SpawnGibs(origin)
                 ))
             end
 
-            -- Defer Ignite one tick so the entity fire system is ready
             timer.Simple(0, function()
                 if IsValid(gib) then
                     gib:Ignite(GIB_LIFETIME, 0)
@@ -471,7 +610,6 @@ local function SpawnGibs(origin)
 end
 
 function ENT:CrashExplode()
-    -- Idempotency: only ever run once per entity lifetime
     if self._CrashFired then return end
     self._CrashFired   = true
     self.TumbleCrashed = true
@@ -498,8 +636,6 @@ function ENT:CrashExplode()
     end
 
     BigBlast(pos)
-
-    -- Spawn gibs at crash origin
     SpawnGibs(pos)
 
     local delays  = { 0.9, 1.9, 3.1 }
@@ -525,7 +661,6 @@ function ENT:CrashExplode()
         end)
     end
 
-    -- Remove after the last cook-off blast has fired
     timer.Simple(3.5, function()
         local ent = Entity(entIdx)
         if IsValid(ent) then ent:Remove() end
@@ -546,12 +681,6 @@ function ENT:DestroyPlane()
 
     self:StartTumble()
 
-    -- Safety net: plane spawned over void or got stuck and never hit ground.
-    -- The class check is CRITICAL: after CrashExplode removes this entity (at t+3.5s),
-    -- the engine may recycle the same EntIndex for a completely different entity.
-    -- Without the class guard, ent:CrashExplode() at t+20s would call a nil method
-    -- on that recycled entity, producing the "attempt to call method 'CrashExplode'
-    -- (a nil value)" error at line 550.
     local entIdx = self:EntIndex()
     timer.Simple(20, function()
         local ent = Entity(entIdx)
@@ -595,43 +724,93 @@ function ENT:PhysicsUpdate(phys)
 
     if not self.DieTime or not self.sky then return end
     if CurTime() >= self.DieTime then self:Remove() return end
+
     local pos = self:GetPos()
+    local ct  = CurTime()
+    local dt  = engine.TickInterval()
+
     self.LastPos = pos
-    if CurTime() >= self.AltDriftNextPick then
+
+    -- ---- Altitude drift (same as original) ----
+    if ct >= self.AltDriftNextPick then
         self.AltDriftTarget   = self.sky + math.Rand(-self.AltDriftRange, self.AltDriftRange)
-        self.AltDriftNextPick = CurTime() + math.Rand(12, 30)
+        self.AltDriftNextPick = ct + math.Rand(12, 30)
     end
     self.AltDriftCurrent = Lerp(self.AltDriftLerp, self.AltDriftCurrent, self.AltDriftTarget)
     self.JitterPhase = self.JitterPhase + 0.02
     local jitter     = math.sin(self.JitterPhase) * self.JitterAmplitude
-    local liveAlt    = self.AltDriftCurrent + jitter
+
+    -- ---- Evasion probes (rate-limited to 20 Hz) ----
+    local flatFwd = Angle(0, self.ang.y, 0):Forward()
+    flatFwd.z = 0
+    if flatFwd:LengthSqr() < 0.01 then flatFwd = Vector(1, 0, 0) end
+    flatFwd:Normalize()
+
+    if ct - self.ObsLastEval >= OBS_EVAL_RATE then
+        self.ObsLastEval = ct
+
+        local skyYaw, skyAlt = self:EvaluateSkyProbes(pos, flatFwd)
+        local obsYaw, obsAlt = self:EvaluateObstacleProbes(pos, flatFwd)
+
+        self.SkyYawBias = self.SkyYawBias + skyYaw
+        self.ObsYawBias = self.ObsYawBias + obsYaw
+        self.ObsAltBias = self.ObsAltBias + obsAlt
+
+        -- Apply altitude correction immediately to drift target
+        local totalAlt = skyAlt + obsAlt
+        if totalAlt ~= 0 then
+            self.AltDriftTarget = math.Clamp(
+                self.AltDriftTarget + totalAlt,
+                self.sky - self.AltDriftRange * 2,
+                self.sky + self.AltDriftRange * 0.5
+            )
+            -- Fast-lerp so the plane reacts quickly to an imminent obstacle
+            self.AltDriftCurrent = Lerp(self.AltDriftLerp * 10, self.AltDriftCurrent, self.AltDriftTarget)
+        end
+    end
+
+    -- Per-tick bias decay
+    self.SkyYawBias = math.Clamp(self.SkyYawBias * SKY_YAW_BIAS_DECAY, -1.8, 1.8)
+    self.ObsYawBias = math.Clamp(self.ObsYawBias * OBS_YAW_DECAY,       -2.5, 2.5)
+    self.ObsAltBias = self.ObsAltBias * OBS_ALT_DECAY
+
+    -- ---- Orbit steering (original logic preserved) ----
     local flatPos    = Vector(pos.x, pos.y, 0)
     local flatCenter = Vector(self.CenterPos.x, self.CenterPos.y, 0)
     local dist       = flatPos:Distance(flatCenter)
     local orbitYaw = 0
-    if dist > self.OrbitRadius and (self.TurnDelay or 0) < CurTime() then
-        orbitYaw = 0.1 self.TurnDelay = CurTime() + 0.02
+    if dist > self.OrbitRadius and (self.TurnDelay or 0) < ct then
+        orbitYaw = 0.1
+        self.TurnDelay = ct + 0.02
     end
-    local trSkyCheck = util.QuickTrace(self:GetPos(), self:GetForward() * 3000, self)
-    local skyYaw = 0
-    if trSkyCheck.HitSky then skyYaw = 0.3 end
-    self.ang = self.ang + Angle(0, orbitYaw + skyYaw, 0)
+
+    -- Combine orbit yaw with evasion biases
+    local totalYaw = orbitYaw + self.SkyYawBias + self.ObsYawBias
+    self.ang = self.ang + Angle(0, totalYaw, 0)
+
     local currentYaw  = self.ang.y
     local rawYawDelta = math.NormalizeAngle(currentYaw - (self.PrevYaw or currentYaw))
     self.PrevYaw      = currentYaw
     self.flightYaw    = currentYaw
+
     local targetRoll  = math.Clamp(rawYawDelta * -18, -15, 15)
     local rollLerp    = rawYawDelta ~= 0 and 0.08 or 0.04
     self.SmoothedRoll = Lerp(rollLerp, self.SmoothedRoll, targetRoll)
+
     local forward     = self.ang:Forward()
     local vel         = forward * self.Speed
     local targetPitch = math.Clamp(-vel.z * 0.02, -8, 8)
     self.SmoothedPitch = Lerp(0.03, self.SmoothedPitch, targetPitch)
+
+    local liveAlt = self.AltDriftCurrent + self.ObsAltBias + jitter
+
     local finalAng = Angle(self.SmoothedPitch, self.ang.y, self.SmoothedRoll)
     phys:SetAngles(finalAng)
-    phys:SetPos(Vector(pos.x + vel.x * engine.TickInterval(),
-                       pos.y + vel.y * engine.TickInterval(),
-                       liveAlt))
+    phys:SetPos(Vector(
+        pos.x + vel.x * dt,
+        pos.y + vel.y * dt,
+        liveAlt
+    ))
     phys:SetVelocity(vel)
 end
 
@@ -704,7 +883,6 @@ function ENT:ArmWeapon(weapon, ct)
         self.GAU_SweepStartPos = targetPos - sweepDir * self.GAU_SweepHalfLength
         self.GAU_SweepEndPos   = targetPos + sweepDir * self.GAU_SweepHalfLength
     elseif self.CurrentWeapon == "jassm" then
-        -- Reset per-salvo shot counter; JASSM_DeployCount tracks lifetime total separately
         self.JASSM_SalvoFired = 0
     end
 end
@@ -925,201 +1103,4 @@ function ENT:Update40mm(ct)
     if dir:LengthSqr() < 1 then return end
     dir:Normalize()
     if HasGred() then
-        local shell = gred.CreateShell(muzzlePos, dir:Angle(), self, { self }, 40, "HE", 800, 0.9, "yellow", self.GUN40_Damage, nil, self.GUN40_TNT)
-        if IsValid(shell) then
-            if shell.Arm then shell:Arm() end
-            if shell.SetArmed then shell:SetArmed(true) end
-            shell.Armed = true shell.ShouldExplode = true
-            local phys = shell:GetPhysicsObject()
-            if IsValid(phys) then phys:EnableGravity(true) phys:SetVelocity(dir * self.GUN40_ShellVelocity) end
-        end
-    else
-        local m = ents.Create("rpg_missile")
-        if IsValid(m) then
-            m:SetPos(muzzlePos) m:SetAngles(dir:Angle()) m:SetOwner(self) m:Spawn() m:Activate()
-            local phys = m:GetPhysicsObject()
-            if IsValid(phys) then phys:SetVelocity(dir * 1600) end
-        end
-    end
-    self:Spawn40mmMuzzleFX()
-    self:EmitSpatialSound(
-        "killstreak_rewards/ac-130_40mm_fire.wav", self.CenterPos, WEAPON_LEVEL, math.random(96,104), 1.0
-    )
-end
-
-function ENT:Spawn105mmEffects(pos)
-    local ed1 = EffectData() ed1:SetOrigin(pos) ed1:SetScale(6) ed1:SetMagnitude(6) ed1:SetRadius(600) util.Effect("500lb_air", ed1, true, true)
-    local ed2 = EffectData() ed2:SetOrigin(pos + Vector(0,0,80)) ed2:SetScale(5) ed2:SetMagnitude(5) ed2:SetRadius(500) util.Effect("500lb_air", ed2, true, true)
-    local ed3 = EffectData() ed3:SetOrigin(pos + Vector(0,0,180)) ed3:SetScale(4) ed3:SetMagnitude(4) ed3:SetRadius(400) util.Effect("500lb_air", ed3, true, true)
-    local ed4 = EffectData() ed4:SetOrigin(pos) ed4:SetScale(6) ed4:SetMagnitude(6) ed4:SetRadius(600) util.Effect("HelicopterMegaBomb", ed4, true, true)
-    local ed5 = EffectData() ed5:SetOrigin(pos + Vector(0,0,100)) ed5:SetScale(5) ed5:SetMagnitude(5) ed5:SetRadius(500) util.Effect("HelicopterMegaBomb", ed5, true, true)
-end
-
-function ENT:Update105mm(ct)
-    if not self.NextShotTime105 or ct < self.NextShotTime105 then return end
-    self.NextShotTime105 = ct + self.GUN105_Delay
-    local muzzlePos = self:GetMuzzlePos()
-    local aimTarget = self:GetTargetGroundPos() + Vector(
-        math.Rand(-self.GUN105_Scatter, self.GUN105_Scatter),
-        math.Rand(-self.GUN105_Scatter, self.GUN105_Scatter), 0)
-    local dir = aimTarget - muzzlePos
-    if dir:LengthSqr() < 1 then return end
-    dir:Normalize()
-    if HasGred() then
-        local shell = gred.CreateShell(muzzlePos, dir:Angle(), self, { self }, 105, "HE", 600, 15, "white", self.GUN105_Damage, nil, self.GUN105_TNT)
-        if IsValid(shell) then
-            if shell.Arm then shell:Arm() end
-            if shell.SetArmed then shell:SetArmed(true) end
-            shell.Armed = true shell.ShouldExplode = true
-            shell.Shocktime = 8 shell.ShockForce = 1200
-            shell.DEFAULT_PHYSFORCE_PLYGROUND = 1500
-            shell.DEFAULT_PHYSFORCE_PLYAIR    = 80
-            Shells105[shell:EntIndex()] = { plane = self }
-            local phys = shell:GetPhysicsObject()
-            if IsValid(phys) then phys:EnableGravity(true) phys:SetVelocity(dir * self.GUN105_ShellVelocity) end
-        end
-    else
-        local m = ents.Create("rpg_missile")
-        if IsValid(m) then
-            m:SetPos(muzzlePos) m:SetAngles(dir:Angle()) m:SetOwner(self) m:Spawn() m:Activate()
-            local phys = m:GetPhysicsObject()
-            if IsValid(phys) then phys:SetVelocity(dir * 1800) end
-        end
-    end
-    self:SpawnHeavyMuzzleFX(3)
-    self:EmitSpatialSound(
-        "killstreak_rewards/ac-130_105mm_fire.wav", self.CenterPos, WEAPON_LEVEL, math.random(96,104), 1.0
-    )
-end
-
--- ============================================================
--- W1: JASSM
--- Mirrors the C-17's SpawnOneJASSM safety architecture:
---   1. dropIndex is 0-based per-salvo (not a lifetime counter)
---   2. Altitude guard: abort if drop height < JASSM_MIN_DROP_HEIGHT
---   3. SkyHeightAdd computed with freefall clearance, matching C-17 formula
---   4. NoCollide hold on spawn to prevent self-intersection ignition
--- ============================================================
-function ENT:SpawnOneJASSM(dropIndex)
-    dropIndex = dropIndex or 0
-
-    if not scripted_ents.GetStored("ent_bombin_jassm_owned") then
-        self:Debug("JASSM: ent_bombin_jassm_owned not registered, skipping") return false
-    end
-    if (self.JASSM_Stock or 0) <= 0 then self:Debug("JASSM: bay empty") return false end
-
-    -- Build drop position: tail attachment point, stacked downward by AltOffset per index
-    local tailWorld = self:LocalToWorld(self.JASSM_TailOffset)
-    local dropPos   = Vector(tailWorld.x, tailWorld.y, tailWorld.z - (dropIndex * self.JASSM_AltOffset))
-    if not util.IsInWorld(dropPos) then
-        dropPos = Vector(self.CenterPos.x, self.CenterPos.y, self:GetPos().z - (dropIndex * self.JASSM_AltOffset))
-    end
-
-    -- Altitude safety guard: refuse to drop if too close to the ground
-    local groundZ    = self:FindGround(dropPos)
-    if groundZ == -1 then groundZ = self.CenterPos.z end
-    local dropHeight = math.max(dropPos.z - groundZ, 0)
-    if dropHeight < JASSM_MIN_DROP_HEIGHT then
-        self:Debug("JASSM: altitude too low (" .. math.Round(dropHeight) .. "u), aborting drop #" .. (dropIndex + 1))
-        return false
-    end
-
-    -- SkyHeightAdd: freefall clearance budget, floored at SHA_FLOOR (mirrors C-17)
-    local shaMax = (dropHeight - JASSM_MIN_FREEFALL_CLEARANCE) / 1.25
-    local sha    = math.max(shaMax, JASSM_SHA_FLOOR)
-
-    local callDir = self:GetForward()
-    callDir.z = 0
-    if callDir:LengthSqr() < 0.01 then callDir = Vector(1, 0, 0) end
-    callDir:Normalize()
-
-    local jassm = ents.Create("ent_bombin_jassm_owned")
-    if not IsValid(jassm) then self:Debug("JASSM: ents.Create failed") return false end
-
-    jassm:SetPos(dropPos)
-    jassm:SetAngles(callDir:Angle())
-    jassm.SpawnedFromPlane = true
-    jassm.CenterPos        = self.CenterPos
-    jassm.CallDir          = callDir
-    jassm.Lifetime         = math.min(self.Lifetime, 35)
-    jassm.Speed            = 250
-    jassm.OrbitRadius      = self.OrbitRadius * 0.75
-    jassm.SkyHeightAdd     = sha
-    jassm:SetOwner(self)
-    jassm.IsOnPlane        = true
-    jassm.Launcher         = self
-
-    jassm:Spawn()
-    jassm:Activate()
-
-    if not IsValid(jassm) then return false end
-
-    -- NoCollide hold: prevents the missile clipping the fuselage on release
-    local mHandle = constraint.NoCollide(jassm, self, 0, 0)
-    timer.Simple(1.25, function()
-        if IsValid(mHandle) then mHandle:Remove() end
-    end)
-
-    self.JASSM_Stock       = self.JASSM_Stock - 1
-    self.JASSM_DeployCount = self.JASSM_DeployCount + 1
-    self:SetNWInt("JASSM_Spent", JASSM_MAX_STOCK - self.JASSM_Stock)
-    self:Debug(string.format("JASSM drop #%d SHA=%.0f stock=%d", self.JASSM_DeployCount, sha, self.JASSM_Stock))
-    return true
-end
-
-function ENT:UpdateJASSM(ct)
-    -- One salvo per weapon window; JASSM_SalvoFired is reset in ArmWeapon
-    if self.JASSM_SalvoFired >= 1 then return end
-    if self.JASSM_Stock <= 0 then self.JASSM_SalvoFired = 1 return end
-
-    self.JASSM_SalvoFired = 1
-
-    local tripleRoll = math.random() < 0.20
-    local salvoCount = tripleRoll and math.min(3, self.JASSM_Stock) or 1
-    self:Debug(string.format("JASSM window: salvo=%d triple=%s stock=%d", salvoCount, tostring(tripleRoll), self.JASSM_Stock))
-
-    local entIdx = self:EntIndex()
-
-    -- dropIndex is 0-based and per-salvo, NOT a lifetime deploy counter.
-    -- This ensures correct altitude stacking (0 * AltOffset, 1 * AltOffset, 2 * AltOffset).
-    self:SpawnOneJASSM(0)
-
-    if salvoCount >= 2 then
-        timer.Simple(1.0, function()
-            local p = Entity(entIdx)
-            if not IsValid(p) or p:IsMarkedForDeletion() or p.JASSM_Stock <= 0 then return end
-            p:SpawnOneJASSM(1)
-        end)
-    end
-
-    if salvoCount >= 3 then
-        timer.Simple(2.0, function()
-            local p = Entity(entIdx)
-            if not IsValid(p) or p:IsMarkedForDeletion() or p.JASSM_Stock <= 0 then return end
-            p:SpawnOneJASSM(2)
-        end)
-    end
-end
-
-function ENT:FindGround(centerPos)
-    local startPos   = Vector(centerPos.x, centerPos.y, centerPos.z + 64)
-    local endPos     = Vector(centerPos.x, centerPos.y, -16384)
-    local filterList = { self }
-    local trace      = { start = startPos, endpos = endPos, filter = filterList }
-    local maxNumber  = 0
-    while maxNumber < 100 do
-        local tr = util.TraceLine(trace)
-        if tr.HitWorld then return tr.HitPos.z end
-        if IsValid(tr.Entity) then table.insert(filterList, tr.Entity)
-        else break end
-        maxNumber = maxNumber + 1
-    end
-    return -1
-end
-
-function ENT:OnRemove()
-    if self.IdleLoop         then self.IdleLoop:Stop()         self.IdleLoop         = nil end
-    if self.PlaneAmbientLoop then self.PlaneAmbientLoop:Stop() self.PlaneAmbientLoop = nil end
-    if not self.IsDestroyed then self:StopSprayLoop() end
-    pending_sounds = {}
-end
+        local shell = gred.CreateShell
