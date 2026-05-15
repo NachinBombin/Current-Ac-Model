@@ -204,12 +204,15 @@ ENT.MaxHP = 8000
 ENT.DamageTierThresholds = { 0.75, 0.50, 0.25 }
 
 function ENT:Initialize()
-    self.CenterPos    = self:GetVar("CenterPos", self:GetPos())
-    self.CallDir      = self:GetVar("CallDir", Vector(1, 0, 0))
-    self.Lifetime     = self:GetVar("Lifetime", 40)
-    self.Speed        = self:GetVar("Speed", 300)
-    self.OrbitRadius  = self:GetVar("OrbitRadius", 3000)
-    self.SkyHeightAdd = self:GetVar("SkyHeightAdd", 6000)
+    -- Read params written by the spawner via SetNW*.
+    -- Fall back to sane defaults if spawned without a spawner (e.g. via console).
+    local cp = self:GetNWVector("CenterPos", Vector(0,0,0))
+    self.CenterPos    = (cp:LengthSqr() > 0) and cp or self:GetPos()
+    self.CallDir      = self:GetNWVector("CallDir",      Vector(1, 0, 0))
+    self.Lifetime     = self:GetNWFloat ("Lifetime",     40)
+    self.Speed        = self:GetNWFloat ("Speed",        300)
+    self.OrbitRadius  = self:GetNWFloat ("OrbitRadius",  3000)
+    self.SkyHeightAdd = self:GetNWFloat ("SkyHeightAdd", 6000)
 
     self.MaxHP = self.MaxHP or ENT.MaxHP or 8000
 
@@ -287,7 +290,7 @@ function ENT:Initialize()
         self.PlaneAmbientLoop:Play()
     end
 
-    self:Debug("Spawned at " .. tostring(spawnPos))
+    self:Debug("Spawned at " .. tostring(spawnPos) .. " radius=" .. self.OrbitRadius .. " height=" .. self.SkyHeightAdd)
 
     self.CurrentWeapon      = nil
     self.WeaponWindowEnd    = 0
@@ -725,30 +728,23 @@ function ENT:PhysicsUpdate(phys)
 
     -- ----------------------------------------------------------------
     -- Yaw accumulation
-    -- self.ang.y is normalized to [-180, 180] every tick.
     -- ORBIT_YAW_RATE and SKY_YAW_RATE are POSITIVE = left for this
-    -- model (air_130_l.mdl), because the model's forward axis is NOT
-    -- +X — the Source yaw convention is effectively flipped.
+    -- model (air_130_l.mdl), because the model forward axis is NOT +X.
     -- ----------------------------------------------------------------
     local evasionPitchCorrection = self:UpdateEvasion()
 
     if self.IsEvading then
-        -- EvasionYaw was nudged positive (left). delta > 0 means target
-        -- is left of current heading, so ang.y increases = correct.
         local delta = math.NormalizeAngle(self.EvasionYaw - self.ang.y)
         self.ang = self.ang + Angle(0, delta * EVASION_BLEND, 0)
     else
-        -- Normal orbit: always apply a continuous left-turn rate every tick.
         local orbitYaw   = ORBIT_YAW_RATE
         local flatPos    = Vector(pos.x, pos.y, 0)
         local flatCenter = Vector(self.CenterPos.x, self.CenterPos.y, 0)
         local dist       = flatPos:Distance(flatCenter)
-        -- Drifted too far out — tighten the orbit with an extra left nudge.
         if dist > self.OrbitRadius * 1.15 then
             orbitYaw = orbitYaw + 0.05
         end
 
-        -- Skybox ahead: turn left harder
         local skyYaw = 0
         local trSky  = util.QuickTrace(self:GetPos(), self:GetForward() * 3000, self)
         if trSky.HitSky then skyYaw = SKY_YAW_RATE end
@@ -756,10 +752,8 @@ function ENT:PhysicsUpdate(phys)
         self.ang = self.ang + Angle(0, orbitYaw + skyYaw, 0)
     end
 
-    -- Normalize self.ang.y every tick.
     self.ang = Angle(self.ang.p, math.NormalizeAngle(self.ang.y), self.ang.r)
 
-    -- Roll / pitch cosmetics
     local currentYaw  = self.ang.y
     local rawYawDelta = math.NormalizeAngle(currentYaw - (self.PrevYaw or currentYaw))
     self.PrevYaw      = currentYaw
@@ -795,7 +789,6 @@ function ENT:PhysicsUpdate(phys)
             self.IsEvading    = true
             self.EvasionPitch = 0
         end
-        -- Nudge left (positive for this model)
         self.EvasionYaw = math.NormalizeAngle(self.EvasionYaw + YAW_NUDGE * 4)
         phys:SetPos(pos)
         return
