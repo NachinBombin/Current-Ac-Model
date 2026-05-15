@@ -34,7 +34,6 @@ local JASSM_MAX_STOCK = 6
 
 local TUMBLE_GRAVITY = 600
 
--- JASSM drop safety constants (mirrored from C-17)
 local JASSM_MIN_FREEFALL_CLEARANCE = 800
 local JASSM_SHA_FLOOR              = 400
 local JASSM_MIN_DROP_HEIGHT        = JASSM_SHA_FLOOR * 1.25 + JASSM_MIN_FREEFALL_CLEARANCE
@@ -53,28 +52,26 @@ local WEAPON_LEVEL    = 150
 
 -- ============================================================
 -- EVASION TUNING  (ported from lancet-dive)
--- Distances are scaled up relative to the lancet because the
--- AC-130 is much larger and slower, so it needs earlier warnings.
 -- ============================================================
-local SKY_PROBE_DIST_H   = 2000   -- horizontal sky-boundary look-ahead
-local SKY_PROBE_DIST_V   = 1200   -- vertical sky-boundary look-ahead
-local SKY_YAW_BIAS_RATE  = 0.30   -- yaw nudge per sky hit
-local SKY_YAW_BIAS_DECAY = 0.88   -- per-tick decay
-local SKY_ALT_PUSH       = 200    -- altitude nudge on sky hit (push down)
-local SKY_ALT_RISE       = 150    -- altitude nudge on sky-below hit (rise)
+local SKY_PROBE_DIST_H   = 2000
+local SKY_PROBE_DIST_V   = 1200
+local SKY_YAW_BIAS_RATE  = 0.30
+local SKY_YAW_BIAS_DECAY = 0.88
+local SKY_ALT_PUSH       = 200
+local SKY_ALT_RISE       = 150
 
-local OBS_DIST_FWD     = 1400   -- forward geometry look-ahead
-local OBS_DIST_SIDE    = 1000   -- side look-ahead
-local OBS_DIST_UP      = 700    -- upward look-ahead
-local OBS_DIST_DOWN    = 400    -- downward look-ahead
-local OBS_YAW_RATE     = 0.50   -- yaw nudge per obstacle hit
-local OBS_ALT_PUSH_UP  = 300    -- alt push when obstacle below
-local OBS_ALT_PUSH_DN  = 100    -- alt push when obstacle above
-local OBS_YAW_DECAY    = 0.82   -- per-tick decay
-local OBS_ALT_DECAY    = 0.90   -- per-tick decay
-local OBS_EVAL_RATE    = 0.05   -- seconds between probe evaluations (20 Hz)
-local OBS_NEAR_FRAC    = 0.45   -- fraction of probe dist considered "close"
-local OBS_ESCALATE_MAX = 4      -- consecutive hits before orbit reversal
+local OBS_DIST_FWD     = 1400
+local OBS_DIST_SIDE    = 1000
+local OBS_DIST_UP      = 700
+local OBS_DIST_DOWN    = 400
+local OBS_YAW_RATE     = 0.50
+local OBS_ALT_PUSH_UP  = 300
+local OBS_ALT_PUSH_DN  = 100
+local OBS_YAW_DECAY    = 0.82
+local OBS_ALT_DECAY    = 0.90
+local OBS_EVAL_RATE    = 0.05
+local OBS_NEAR_FRAC    = 0.45
+local OBS_ESCALATE_MAX = 4
 local OBS_TRACE_MASK   = MASK_SOLID_BRUSHONLY
 
 local function PrecacheWeaponSounds()
@@ -266,15 +263,12 @@ function ENT:Initialize()
     self.SmoothedPitch   = 0
     self.PrevYaw         = self:GetAngles().y
 
-    -- ----------------------------------------------------------------
-    -- EVASION STATE  (ported from lancet-dive)
-    -- ----------------------------------------------------------------
+    -- EVASION STATE
     self.SkyYawBias      = 0
     self.ObsYawBias      = 0
     self.ObsAltBias      = 0
     self.ObsConsecHits   = 0
     self.ObsLastEval     = 0
-    -- ----------------------------------------------------------------
 
     self.PhysObj = self:GetPhysicsObject()
     if IsValid(self.PhysObj) then
@@ -329,110 +323,71 @@ function ENT:Initialize()
 end
 
 -- ============================================================
--- EVASION PROBES  (ported from lancet-dive / ent_bombin_lancet)
+-- EVASION PROBES
 -- ============================================================
-
--- Probes for sky-boundary hits (map edges / open sky below).
--- Returns (yawBias, altPush) to be accumulated into the bias vars.
 function ENT:EvaluateSkyProbes(pos, flatFwd)
     local flatRight = Vector(-flatFwd.y, flatFwd.x, 0)
-
     local probes = {
-        { dir = flatFwd,                                             dist = SKY_PROBE_DIST_H, role = "fwd"   },
-        { dir = (flatFwd + flatRight * 0.7):GetNormalized(),         dist = SKY_PROBE_DIST_H, role = "right" },
-        { dir = (flatFwd - flatRight * 0.7):GetNormalized(),         dist = SKY_PROBE_DIST_H, role = "left"  },
-        { dir = Vector(flatFwd.x, flatFwd.y,  1):GetNormalized(),    dist = SKY_PROBE_DIST_V, role = "up"    },
-        { dir = Vector(flatFwd.x, flatFwd.y, -0.5):GetNormalized(),  dist = SKY_PROBE_DIST_V, role = "down"  },
+        { dir = flatFwd,                                            dist = SKY_PROBE_DIST_H, role = "fwd"   },
+        { dir = (flatFwd + flatRight * 0.7):GetNormalized(),        dist = SKY_PROBE_DIST_H, role = "right" },
+        { dir = (flatFwd - flatRight * 0.7):GetNormalized(),        dist = SKY_PROBE_DIST_H, role = "left"  },
+        { dir = Vector(flatFwd.x, flatFwd.y,  1):GetNormalized(),   dist = SKY_PROBE_DIST_V, role = "up"    },
+        { dir = Vector(flatFwd.x, flatFwd.y, -0.5):GetNormalized(), dist = SKY_PROBE_DIST_V, role = "down"  },
     }
-
-    local yawBias = 0
-    local altPush = 0
-
+    local yawBias, altPush = 0, 0
     for _, p in ipairs(probes) do
         local tr = util.QuickTrace(pos, p.dir * p.dist, self)
         if not tr.HitSky then continue end
-
-        if p.role == "fwd" then
-            -- Steer in the current orbit direction to avoid the boundary ahead
-            yawBias = yawBias + SKY_YAW_BIAS_RATE * 2.0
-        elseif p.role == "right" then
-            yawBias = yawBias - SKY_YAW_BIAS_RATE
-        elseif p.role == "left" then
-            yawBias = yawBias + SKY_YAW_BIAS_RATE
-        elseif p.role == "up" then
-            altPush = altPush - SKY_ALT_PUSH
-        elseif p.role == "down" then
-            altPush = altPush + SKY_ALT_RISE
+        if     p.role == "fwd"   then yawBias = yawBias + SKY_YAW_BIAS_RATE * 2.0
+        elseif p.role == "right" then yawBias = yawBias - SKY_YAW_BIAS_RATE
+        elseif p.role == "left"  then yawBias = yawBias + SKY_YAW_BIAS_RATE
+        elseif p.role == "up"    then altPush = altPush - SKY_ALT_PUSH
+        elseif p.role == "down"  then altPush = altPush + SKY_ALT_RISE
         end
     end
-
     return yawBias, altPush
 end
 
--- Probes for solid brush geometry (walls, mountains, buildings).
--- Returns (yawBias, altPush). Also handles orbit-reversal escalation.
 function ENT:EvaluateObstacleProbes(pos, flatFwd)
     local flatRight = Vector(-flatFwd.y, flatFwd.x, 0)
-
     local probes = {
-        { dir = flatFwd,                                                   dist = OBS_DIST_FWD,       role = "fwd"      },
-        { dir = flatFwd,                                                   dist = OBS_DIST_FWD * 0.4, role = "fwd_near" },
-        { dir = (flatFwd + flatRight * 0.65):GetNormalized(),              dist = OBS_DIST_SIDE,      role = "right"    },
-        { dir = (flatFwd - flatRight * 0.65):GetNormalized(),              dist = OBS_DIST_SIDE,      role = "left"     },
-        { dir = Vector(flatFwd.x, flatFwd.y,  0.5):GetNormalized(),        dist = OBS_DIST_UP,        role = "up_fwd"   },
-        { dir = Vector(flatFwd.x, flatFwd.y, -0.4):GetNormalized(),        dist = OBS_DIST_DOWN,      role = "down_fwd" },
+        { dir = flatFwd,                                              dist = OBS_DIST_FWD,       role = "fwd"      },
+        { dir = flatFwd,                                              dist = OBS_DIST_FWD * 0.4, role = "fwd_near" },
+        { dir = (flatFwd + flatRight * 0.65):GetNormalized(),         dist = OBS_DIST_SIDE,      role = "right"    },
+        { dir = (flatFwd - flatRight * 0.65):GetNormalized(),         dist = OBS_DIST_SIDE,      role = "left"     },
+        { dir = Vector(flatFwd.x, flatFwd.y,  0.5):GetNormalized(),   dist = OBS_DIST_UP,        role = "up_fwd"   },
+        { dir = Vector(flatFwd.x, flatFwd.y, -0.4):GetNormalized(),   dist = OBS_DIST_DOWN,      role = "down_fwd" },
     }
-
-    local yawBias = 0
-    local altPush = 0
-    local anyHit  = false
-
+    local yawBias, altPush, anyHit = 0, 0, false
     for _, p in ipairs(probes) do
-        local tr = util.TraceLine({
-            start  = pos,
-            endpos = pos + p.dir * p.dist,
-            filter = self,
-            mask   = OBS_TRACE_MASK,
-        })
-
+        local tr = util.TraceLine({ start = pos, endpos = pos + p.dir * p.dist, filter = self, mask = OBS_TRACE_MASK })
         if not tr.Hit or tr.HitSky then continue end
-
         anyHit = true
         local urgency = (tr.Fraction < OBS_NEAR_FRAC) and 2.0 or 1.0
-
         if p.role == "fwd" or p.role == "fwd_near" then
             local scale = (p.role == "fwd_near") and 1.5 or 1.0
             yawBias = yawBias + OBS_YAW_RATE * urgency * scale
             altPush = altPush + OBS_ALT_PUSH_UP * urgency * scale
-        elseif p.role == "right" then
-            yawBias = yawBias - OBS_YAW_RATE * urgency
-        elseif p.role == "left" then
-            yawBias = yawBias + OBS_YAW_RATE * urgency
-        elseif p.role == "up_fwd" then
-            altPush = altPush - OBS_ALT_PUSH_DN * urgency
-            yawBias = yawBias + OBS_YAW_RATE * 0.5 * urgency
-        elseif p.role == "down_fwd" then
-            altPush = altPush + OBS_ALT_PUSH_UP * 0.6 * urgency
+        elseif p.role == "right"    then yawBias = yawBias - OBS_YAW_RATE * urgency
+        elseif p.role == "left"     then yawBias = yawBias + OBS_YAW_RATE * urgency
+        elseif p.role == "up_fwd"   then altPush = altPush - OBS_ALT_PUSH_DN * urgency; yawBias = yawBias + OBS_YAW_RATE * 0.5 * urgency
+        elseif p.role == "down_fwd" then altPush = altPush + OBS_ALT_PUSH_UP * 0.6 * urgency
         end
     end
-
     if anyHit then
         self.ObsConsecHits = (self.ObsConsecHits or 0) + 1
         if self.ObsConsecHits >= OBS_ESCALATE_MAX then
-            -- Reverse the yaw direction and fire a hard kick to break out
-            yawBias            = yawBias + OBS_YAW_RATE * 4.0
+            yawBias = yawBias + OBS_YAW_RATE * 4.0
             self.ObsConsecHits = 0
-            self:Debug("Obstacle escalation — hard yaw reversal")
+            self:Debug("Obstacle escalation - hard yaw reversal")
         end
     else
         self.ObsConsecHits = math.max(0, (self.ObsConsecHits or 0) - 1)
     end
-
     return yawBias, altPush
 end
 
 -- ============================================================
-
 function ENT:BroadcastDamageTier(tier)
     net.Start("bombin_plane_damage_tier")
         net.WriteUInt(self:EntIndex(), 16)
@@ -541,9 +496,6 @@ end
 
 -- ============================================================
 -- GIB SPAWNER
--- Each gib is staggered 0.1s apart to avoid a bulk-spawn lag spike.
--- Ignite is deferred one tick (timer.Simple(0)) after Activate so
--- the entity fire system is fully ready -- this is the reliable pattern.
 -- ============================================================
 local GIB_MODELS = {
     "models/fonv/vehicles/b29/parts/b29_partwing.mdl",
@@ -562,21 +514,18 @@ local function SpawnGibs(origin)
         timer.Simple((idx - 1) * 0.1, function()
             local gib = ents.Create("prop_physics")
             if not IsValid(gib) then return end
-
             local pos = origin + Vector(
                 math.Rand(-150, 150),
                 math.Rand(-150, 150),
                 math.Rand(  20, 100)
             )
             if not util.IsInWorld(pos) then pos = origin end
-
             gib:SetModel(mdl)
             gib:SetPos(pos)
             gib:SetAngles(Angle(math.Rand(0, 360), math.Rand(0, 360), math.Rand(0, 360)))
             gib:SetCollisionGroup(COLLISION_GROUP_DEBRIS)
             gib:Spawn()
             gib:Activate()
-
             local phys = gib:GetPhysicsObject()
             if IsValid(phys) then
                 phys:SetMass(2000)
@@ -595,16 +544,8 @@ local function SpawnGibs(origin)
                     math.Rand(-2000, 2000)
                 ))
             end
-
-            timer.Simple(0, function()
-                if IsValid(gib) then
-                    gib:Ignite(GIB_LIFETIME, 0)
-                end
-            end)
-
-            timer.Simple(GIB_LIFETIME, function()
-                if IsValid(gib) then gib:Remove() end
-            end)
+            timer.Simple(0, function() if IsValid(gib) then gib:Ignite(GIB_LIFETIME, 0) end end)
+            timer.Simple(GIB_LIFETIME, function() if IsValid(gib) then gib:Remove() end end)
         end)
     end
 end
@@ -621,15 +562,12 @@ function ENT:CrashExplode()
         local ed1 = EffectData()
         ed1:SetOrigin(bpos) ed1:SetScale(7) ed1:SetMagnitude(7) ed1:SetRadius(700)
         util.Effect("HelicopterMegaBomb", ed1, true, true)
-
         local ed2 = EffectData()
         ed2:SetOrigin(bpos + Vector(0, 0, 90)) ed2:SetScale(6) ed2:SetMagnitude(6) ed2:SetRadius(600)
         util.Effect("500lb_air", ed2, true, true)
-
         local ed3 = EffectData()
         ed3:SetOrigin(bpos + Vector(0, 0, 200)) ed3:SetScale(5) ed3:SetMagnitude(5) ed3:SetRadius(500)
         util.Effect("500lb_air", ed3, true, true)
-
         sound.Play("ambient/explosions/explode_8.wav", bpos, 145, math.random(85, 95),  1.0)
         sound.Play("ambient/explosions/explode_4.wav", bpos, 140, math.random(90, 105), 0.9)
         util.BlastDamage(game.GetWorld(), game.GetWorld(), bpos, 350, 180)
@@ -678,7 +616,6 @@ function ENT:DestroyPlane()
     if self.PlaneAmbientLoop then self.PlaneAmbientLoop:Stop() self.PlaneAmbientLoop = nil end
     self:StopSprayLoop()
     self:BroadcastDamageTier(0)
-
     self:StartTumble()
 
     local entIdx = self:EntIndex()
@@ -719,9 +656,11 @@ function ENT:Think()
     return true
 end
 
+-- ============================================================
+-- PHYSICS UPDATE (flight + evasion)
+-- ============================================================
 function ENT:PhysicsUpdate(phys)
     if self.IsTumbling or self.IsDestroyed then return end
-
     if not self.DieTime or not self.sky then return end
     if CurTime() >= self.DieTime then self:Remove() return end
 
@@ -731,7 +670,7 @@ function ENT:PhysicsUpdate(phys)
 
     self.LastPos = pos
 
-    -- ---- Altitude drift (same as original) ----
+    -- Altitude drift
     if ct >= self.AltDriftNextPick then
         self.AltDriftTarget   = self.sky + math.Rand(-self.AltDriftRange, self.AltDriftRange)
         self.AltDriftNextPick = ct + math.Rand(12, 30)
@@ -740,7 +679,7 @@ function ENT:PhysicsUpdate(phys)
     self.JitterPhase = self.JitterPhase + 0.02
     local jitter     = math.sin(self.JitterPhase) * self.JitterAmplitude
 
-    -- ---- Evasion probes (rate-limited to 20 Hz) ----
+    -- Evasion probes (rate-limited to 20 Hz)
     local flatFwd = Angle(0, self.ang.y, 0):Forward()
     flatFwd.z = 0
     if flatFwd:LengthSqr() < 0.01 then flatFwd = Vector(1, 0, 0) end
@@ -748,15 +687,11 @@ function ENT:PhysicsUpdate(phys)
 
     if ct - self.ObsLastEval >= OBS_EVAL_RATE then
         self.ObsLastEval = ct
-
         local skyYaw, skyAlt = self:EvaluateSkyProbes(pos, flatFwd)
         local obsYaw, obsAlt = self:EvaluateObstacleProbes(pos, flatFwd)
-
         self.SkyYawBias = self.SkyYawBias + skyYaw
         self.ObsYawBias = self.ObsYawBias + obsYaw
         self.ObsAltBias = self.ObsAltBias + obsAlt
-
-        -- Apply altitude correction immediately to drift target
         local totalAlt = skyAlt + obsAlt
         if totalAlt ~= 0 then
             self.AltDriftTarget = math.Clamp(
@@ -764,27 +699,24 @@ function ENT:PhysicsUpdate(phys)
                 self.sky - self.AltDriftRange * 2,
                 self.sky + self.AltDriftRange * 0.5
             )
-            -- Fast-lerp so the plane reacts quickly to an imminent obstacle
             self.AltDriftCurrent = Lerp(self.AltDriftLerp * 10, self.AltDriftCurrent, self.AltDriftTarget)
         end
     end
 
-    -- Per-tick bias decay
     self.SkyYawBias = math.Clamp(self.SkyYawBias * SKY_YAW_BIAS_DECAY, -1.8, 1.8)
     self.ObsYawBias = math.Clamp(self.ObsYawBias * OBS_YAW_DECAY,       -2.5, 2.5)
     self.ObsAltBias = self.ObsAltBias * OBS_ALT_DECAY
 
-    -- ---- Orbit steering (original logic preserved) ----
+    -- Orbit steering
     local flatPos    = Vector(pos.x, pos.y, 0)
     local flatCenter = Vector(self.CenterPos.x, self.CenterPos.y, 0)
     local dist       = flatPos:Distance(flatCenter)
-    local orbitYaw = 0
+    local orbitYaw   = 0
     if dist > self.OrbitRadius and (self.TurnDelay or 0) < ct then
         orbitYaw = 0.1
         self.TurnDelay = ct + 0.02
     end
 
-    -- Combine orbit yaw with evasion biases
     local totalYaw = orbitYaw + self.SkyYawBias + self.ObsYawBias
     self.ang = self.ang + Angle(0, totalYaw, 0)
 
@@ -797,9 +729,9 @@ function ENT:PhysicsUpdate(phys)
     local rollLerp    = rawYawDelta ~= 0 and 0.08 or 0.04
     self.SmoothedRoll = Lerp(rollLerp, self.SmoothedRoll, targetRoll)
 
-    local forward     = self.ang:Forward()
-    local vel         = forward * self.Speed
-    local targetPitch = math.Clamp(-vel.z * 0.02, -8, 8)
+    local forward      = self.ang:Forward()
+    local vel          = forward * self.Speed
+    local targetPitch  = math.Clamp(-vel.z * 0.02, -8, 8)
     self.SmoothedPitch = Lerp(0.03, self.SmoothedPitch, targetPitch)
 
     local liveAlt = self.AltDriftCurrent + self.ObsAltBias + jitter
@@ -814,6 +746,9 @@ function ENT:PhysicsUpdate(phys)
     phys:SetVelocity(vel)
 end
 
+-- ============================================================
+-- WEAPON SYSTEM
+-- ============================================================
 function ENT:HandleWeaponWindow(ct)
     if self.IsPeaceful then
         if ct >= self.PeacefulUntil then
@@ -933,8 +868,8 @@ function ENT:GetTargetGroundPos()
 end
 
 function ENT:GetGAUMuzzlePos()
-    local pos   = self:GetPos()
-    local ang   = self:GetAngles()
+    local pos = self:GetPos()
+    local ang = self:GetAngles()
     return pos
         + ang:Forward() * self.GAU_MuzzleForwardOffset
         + ang:Right()   * self.GAU_MuzzleSideOffset
@@ -955,13 +890,11 @@ function ENT:SpawnGAUMuzzleFX()
     local worldPos = self:GetGAUMuzzlePos()
     local localPos = self:WorldToLocal(worldPos)
     local ang      = self:GetAngles()
-
     net.Start("bombin_muzzle_flash")
         net.WriteUInt  (self:EntIndex(), 16)
         net.WriteVector(localPos)
         net.WriteVector(worldPos)
     net.Broadcast()
-
     for _ = 1, 2 do
         local sp = EffectData()
         sp:SetOrigin(worldPos + Vector(math.Rand(-4,4), math.Rand(-4,4), 0))
@@ -974,13 +907,11 @@ function ENT:Spawn40mmMuzzleFX()
     local worldPos = self:GetMuzzlePos()
     local localPos = self:WorldToLocal(worldPos)
     local ang      = self:GetAngles()
-
     net.Start("bombin_muzzle_flash_40mm")
         net.WriteUInt  (self:EntIndex(), 16)
         net.WriteVector(localPos)
         net.WriteVector(worldPos)
     net.Broadcast()
-
     for _ = 1, 3 do
         local sp = EffectData()
         sp:SetOrigin(worldPos + Vector(math.Rand(-8,8), math.Rand(-8,8), math.Rand(-4,4)))
@@ -1102,5 +1033,152 @@ function ENT:Update40mm(ct)
     local dir = aimTarget - muzzlePos
     if dir:LengthSqr() < 1 then return end
     dir:Normalize()
+    self:Spawn40mmMuzzleFX()
+    self:EmitSpatialSound("killstreak_rewards/ac-130_40mm_fire.wav", muzzlePos, WEAPON_LEVEL, math.random(96, 104), 1.0)
     if HasGred() then
-        local shell = gred.CreateShell
+        local shell = gred.CreateShell({
+            Attacker  = self,
+            Pos       = muzzlePos,
+            Dir       = dir,
+            Velocity  = self.GUN40_ShellVelocity,
+            Damage    = self.GUN40_Damage,
+            TNTEquiv  = self.GUN40_TNT,
+            Caliber   = "40mm",
+        })
+    else
+        local rocket = ents.Create("rpg_missile")
+        if IsValid(rocket) then
+            rocket:SetPos(muzzlePos)
+            rocket:SetAngles(dir:Angle())
+            rocket:Spawn()
+            rocket:Activate()
+            local phys = rocket:GetPhysicsObject()
+            if IsValid(phys) then
+                phys:SetVelocity(dir * self.GUN40_ShellVelocity)
+            end
+        end
+    end
+end
+
+function ENT:Update105mm(ct)
+    if not self.NextShotTime105 or ct < self.NextShotTime105 then return end
+    self.NextShotTime105 = ct + self.GUN105_Delay
+    local muzzlePos = self:GetMuzzlePos()
+    local aimTarget = self:GetTargetGroundPos() + Vector(
+        math.Rand(-self.GUN105_Scatter, self.GUN105_Scatter),
+        math.Rand(-self.GUN105_Scatter, self.GUN105_Scatter), 0)
+    local dir = aimTarget - muzzlePos
+    if dir:LengthSqr() < 1 then return end
+    dir:Normalize()
+    self:SpawnHeavyMuzzleFX(3)
+    self:EmitSpatialSound("killstreak_rewards/ac-130_105mm_fire.wav", muzzlePos, WEAPON_LEVEL, math.random(96, 104), 1.0)
+    if HasGred() then
+        local shell = gred.CreateShell({
+            Attacker  = self,
+            Pos       = muzzlePos,
+            Dir       = dir,
+            Velocity  = self.GUN105_ShellVelocity,
+            Damage    = self.GUN105_Damage,
+            TNTEquiv  = self.GUN105_TNT,
+            Caliber   = "105mm",
+        })
+        if IsValid(shell) then
+            Shells105[shell:EntIndex()] = true
+        end
+    else
+        local rocket = ents.Create("rpg_missile")
+        if IsValid(rocket) then
+            rocket:SetPos(muzzlePos)
+            rocket:SetAngles(dir:Angle())
+            rocket:Spawn()
+            rocket:Activate()
+            local phys = rocket:GetPhysicsObject()
+            if IsValid(phys) then
+                phys:SetVelocity(dir * self.GUN105_ShellVelocity)
+            end
+        end
+    end
+end
+
+-- ============================================================
+-- JASSM
+-- ============================================================
+function ENT:UpdateJASSM(ct)
+    if ct >= self.WeaponWindowEnd then return end
+    if (self.JASSM_Stock or 0) <= 0 then self:EnterPeaceful(ct) return end
+
+    local salvoMax = math.min(3, self.JASSM_Stock)
+    if self.JASSM_SalvoFired >= salvoMax then
+        self:EnterPeaceful(ct)
+        return
+    end
+
+    if not self.NextJASSMTime or ct < self.NextJASSMTime then return end
+    self.NextJASSMTime  = ct + 1.2
+    self.JASSM_SalvoFired = self.JASSM_SalvoFired + 1
+    self:FireJASSM()
+end
+
+function ENT:FireJASSM()
+    local dropPos  = self:GetPos() + self:GetAngles():Forward() * self.JASSM_TailOffset.x
+    dropPos.z      = self.sky - self.JASSM_AltOffset
+
+    local groundZ  = self.TumbleGroundZ or (self.sky - self.SkyHeightAdd)
+    local heightAboveGround = dropPos.z - groundZ
+    if heightAboveGround < JASSM_MIN_DROP_HEIGHT then
+        self:Debug("JASSM drop aborted: insufficient altitude")
+        return
+    end
+
+    local target = self:GetPrimaryTarget()
+    local aimPos
+    if IsValid(target) then
+        aimPos = target:GetPos()
+    else
+        local tr = util.QuickTrace(
+            Vector(self.CenterPos.x, self.CenterPos.y, self.sky),
+            Vector(0,0,-30000), self
+        )
+        aimPos = tr.HitPos
+    end
+
+    local jassm = ents.Create("ent_bombin_jassm")
+    if not IsValid(jassm) then
+        self:Debug("JASSM entity failed to create")
+        return
+    end
+
+    jassm:SetPos(dropPos)
+    jassm:SetAngles(self:GetAngles())
+    jassm.TargetPos = aimPos
+    jassm.Firer     = self
+    jassm:Spawn()
+    jassm:Activate()
+
+    self.JASSM_Stock = self.JASSM_Stock - 1
+    self:SetNWInt("JASSM_Spent", JASSM_MAX_STOCK - self.JASSM_Stock)
+    self:Debug("JASSM fired. Stock remaining: " .. tostring(self.JASSM_Stock))
+end
+
+-- ============================================================
+-- FIND GROUND
+-- ============================================================
+function ENT:FindGround(pos)
+    local searchPos = Vector(pos.x, pos.y, pos.z)
+    local attempts  = {
+        Vector(0,    0,    0),
+        Vector(200,  0,    0),
+        Vector(-200, 0,    0),
+        Vector(0,    200,  0),
+        Vector(0,   -200,  0),
+    }
+    for _, offset in ipairs(attempts) do
+        local from = searchPos + offset + Vector(0, 0, 1000)
+        local to   = searchPos + offset + Vector(0, 0, -32000)
+        local tr   = util.TraceLine({ start = from, endpos = to, mask = MASK_SOLID_BRUSHONLY })
+        if tr.Hit and not tr.HitSky then
+            return tr.HitPos.z
+        end
+    end
+    return -1
+end
