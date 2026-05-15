@@ -251,10 +251,13 @@ function ENT:Initialize()
     self:SetNWInt("MaxHP", self.MaxHP)
 
     local ang = self.CallDir:Angle()
-    self:SetAngles(Angle(0, ang.y - 90, 0))
+    -- Store initial yaw normalized into [-180, 180] so self.ang.y is always
+    -- in that range from the very first tick.
+    local initYaw = math.NormalizeAngle(ang.y - 90)
+    self:SetAngles(Angle(0, initYaw, 0))
     self.ang = self:GetAngles()
 
-    self.flightYaw = ang.y - 90
+    self.flightYaw = initYaw
 
     self.AltDriftCurrent  = self.sky
     self.AltDriftTarget   = self.sky
@@ -266,10 +269,10 @@ function ENT:Initialize()
     self.JitterAmplitude = 5
     self.SmoothedRoll    = 0
     self.SmoothedPitch   = 0
-    self.PrevYaw         = self:GetAngles().y
+    self.PrevYaw         = initYaw
 
     self.IsEvading     = false
-    self.EvasionYaw    = self.flightYaw
+    self.EvasionYaw    = initYaw
     self.EvasionPitch  = 0
     self.EvasionClearT = 0
 
@@ -381,14 +384,18 @@ function ENT:UpdateEvasion()
         self.EvasionClearT = 0
 
         if not self.IsEvading then
-            self.EvasionYaw   = self.ang.y
+            -- Always seed EvasionYaw from the normalized current yaw so the
+            -- initial delta is zero and blending starts from the correct side.
+            self.EvasionYaw   = math.NormalizeAngle(self.ang.y)
             self.IsEvading    = true
             self.EvasionPitch = 0
             self:Debug("Evasion started")
         end
 
-        -- Always turn left: subtract nudge (negative yaw = left in Source)
-        self.EvasionYaw = self.EvasionYaw - YAW_NUDGE
+        -- Always turn left: subtract nudge (negative yaw = left in Source).
+        -- Normalize after each nudge so EvasionYaw stays in [-180, 180]
+        -- and the delta computed below never crosses the ±180 wrap boundary.
+        self.EvasionYaw = math.NormalizeAngle(self.EvasionYaw - YAW_NUDGE)
 
         if hitDown and not hitUp then
             self.EvasionPitch = self.EvasionPitch - PITCH_NUDGE
@@ -732,34 +739,47 @@ function ENT:PhysicsUpdate(phys)
     local jitter     = math.sin(self.JitterPhase) * self.JitterAmplitude
     local liveAlt    = self.AltDriftCurrent + jitter
 
-    -- Evasion / orbit yaw (all turns are left = negative yaw in Source)
+    -- ----------------------------------------------------------------
+    -- Yaw accumulation
+    -- IMPORTANT: self.ang.y is our authoritative yaw tracker.
+    -- It must stay normalized in [-180, 180] at all times.
+    -- If it is ever allowed to drift past ±180 (e.g. after thousands of
+    -- ticks of -0.1 deg/tick accumulation), math.NormalizeAngle returns
+    -- the wrong sign and evasion blending steers the wrong way.
+    -- ----------------------------------------------------------------
     local evasionPitchCorrection = self:UpdateEvasion()
 
     if self.IsEvading then
-        -- Blend current yaw toward evasion target (always decreasing = left)
+        -- Both EvasionYaw and self.ang.y are normalized, so delta is always
+        -- a small angle in [-180, 180] with the correct sign.
+        -- EvasionYaw < self.ang.y  →  delta negative  →  ang.y decreases = left.
         local delta = math.NormalizeAngle(self.EvasionYaw - self.ang.y)
         self.ang = self.ang + Angle(0, delta * EVASION_BLEND, 0)
     else
         -- Normal orbit: always apply a continuous left-turn rate every tick.
-        -- ORBIT_YAW_RATE is negative (left in Source). Previously this was only
-        -- applied when dist > OrbitRadius, so the plane never actually circled.
-        local orbitYaw   = ORBIT_YAW_RATE   -- always left, every tick
+        -- ORBIT_YAW_RATE is negative = left in Source.
+        local orbitYaw   = ORBIT_YAW_RATE
         local flatPos    = Vector(pos.x, pos.y, 0)
         local flatCenter = Vector(self.CenterPos.x, self.CenterPos.y, 0)
         local dist       = flatPos:Distance(flatCenter)
-        -- If the plane drifted too far out, add an extra inward (left) nudge
-        -- to pull it back onto the orbit circle rather than suppressing the rate.
+        -- If drifted too far out, add an extra left nudge to tighten the orbit.
         if dist > self.OrbitRadius * 1.15 then
-            orbitYaw = orbitYaw - 0.05   -- tighten further left
+            orbitYaw = orbitYaw - 0.05
         end
 
-        -- Skybox ahead: turn left
+        -- Skybox ahead: turn left harder
         local skyYaw = 0
         local trSky  = util.QuickTrace(self:GetPos(), self:GetForward() * 3000, self)
         if trSky.HitSky then skyYaw = SKY_YAW_RATE end
 
         self.ang = self.ang + Angle(0, orbitYaw + skyYaw, 0)
     end
+
+    -- Normalize self.ang.y every tick so it never drifts outside [-180, 180].
+    -- This is the critical fix: without this, after ~1800 ticks of -0.1/tick
+    -- the yaw reaches -180 and wraps to large positive values, corrupting
+    -- every subsequent NormalizeAngle delta calculation.
+    self.ang = Angle(self.ang.p, math.NormalizeAngle(self.ang.y), self.ang.r)
 
     -- Roll / pitch cosmetics
     local currentYaw  = self.ang.y
@@ -793,11 +813,11 @@ function ENT:PhysicsUpdate(phys)
     if not util.IsInWorld(newPos) then
         self:Debug("Position guard: out-of-world move discarded")
         if not self.IsEvading then
-            self.EvasionYaw   = self.ang.y
+            self.EvasionYaw   = math.NormalizeAngle(self.ang.y)
             self.IsEvading    = true
             self.EvasionPitch = 0
         end
-        self.EvasionYaw = self.EvasionYaw - YAW_NUDGE * 4
+        self.EvasionYaw = math.NormalizeAngle(self.EvasionYaw - YAW_NUDGE * 4)
         phys:SetPos(pos)
         return
     end
